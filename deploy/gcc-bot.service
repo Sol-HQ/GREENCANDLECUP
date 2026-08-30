@@ -1,0 +1,15 @@
+[Unit]
+Description=GCC Phoenix Bot + API
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/greencandlecup
+EnvironmentFile=/opt/greencandlecup/.env
+ExecStart=/usr/bin/node apps/server/dist/index.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
