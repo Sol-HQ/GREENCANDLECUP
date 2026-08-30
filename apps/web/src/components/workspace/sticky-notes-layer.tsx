@@ -6,17 +6,25 @@ import { useWorkspace } from "./workspace-context";
 
 export function StickyNotesLayer() {
   const { notes, updateNote, removeNote } = useWorkspace();
-  const drag = useRef<{ id: string; ox: number; oy: number } | null>(null);
+  const drag = useRef<{
+    id: string;
+    startX: number;
+    startY: number;
+    noteX: number;
+    noteY: number;
+  } | null>(null);
   const [colorPickerFor, setColorPickerFor] = useState<string | null>(null);
 
+  if (notes.length === 0) return null;
+
   return (
-    <div className="pointer-events-none absolute inset-0 z-30">
+    <div className="pointer-events-none absolute inset-0 z-50">
       {notes.map((note) => {
         const dim = STICKY_DIMENSIONS[note.size];
         return (
           <div
             key={note.id}
-            className="pointer-events-auto absolute rounded-lg border border-zinc-700/60 shadow-lg"
+            className="pointer-events-auto absolute rounded-lg border border-zinc-700/60 shadow-xl ring-1 ring-black/20"
             style={{
               left: note.x,
               top: note.y,
@@ -26,27 +34,30 @@ export function StickyNotesLayer() {
             }}
           >
             <div
-              className="flex cursor-move items-center justify-between rounded-t-lg bg-black/10 px-2 py-1 text-[10px] text-zinc-800"
+              className="flex cursor-move items-center justify-between rounded-t-lg bg-black/10 px-2 py-1 text-[10px] font-medium text-zinc-800"
               onPointerDown={(e) => {
+                e.stopPropagation();
                 drag.current = {
                   id: note.id,
-                  ox: e.clientX - note.x,
-                  oy: e.clientY - note.y,
+                  startX: e.clientX,
+                  startY: e.clientY,
+                  noteX: note.x,
+                  noteY: note.y,
                 };
-                (e.target as HTMLElement).setPointerCapture(e.pointerId);
+                (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
               }}
               onPointerMove={(e) => {
                 if (!drag.current || drag.current.id !== note.id) return;
                 updateNote(note.id, {
-                  x: e.clientX - drag.current.ox,
-                  y: e.clientY - drag.current.oy,
+                  x: drag.current.noteX + (e.clientX - drag.current.startX),
+                  y: drag.current.noteY + (e.clientY - drag.current.startY),
                 });
               }}
               onPointerUp={() => {
                 drag.current = null;
               }}
             >
-              <span>{note.size.toUpperCase()} note</span>
+              <span>{note.size.toUpperCase()} sticky</span>
               <div className="flex gap-1">
                 <button
                   type="button"
@@ -87,6 +98,7 @@ export function StickyNotesLayer() {
               placeholder="Type your note…"
               value={note.text}
               onChange={(e) => updateNote(note.id, { text: e.target.value })}
+              onPointerDown={(e) => e.stopPropagation()}
             />
           </div>
         );

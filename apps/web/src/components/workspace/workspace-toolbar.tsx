@@ -60,7 +60,7 @@ export function WorkspaceToolbar() {
         ))}
       </div>
       <span className="text-zinc-600">|</span>
-      <span className="text-zinc-500">Sticky:</span>
+      <span className="text-zinc-500">Sticky notes:</span>
       {(["sm", "md", "lg"] as const).map((size) => (
         <Button
           key={size}
@@ -70,9 +70,18 @@ export function WorkspaceToolbar() {
             setTool("select");
           }}
         >
-          {size.toUpperCase()}
+          + {size.toUpperCase()}
         </Button>
       ))}
+      {pendingStickySize ? (
+        <span className="rounded bg-amber-500/20 px-2 py-1 text-amber-200">
+          Click anywhere below to place {pendingStickySize.toUpperCase()} note
+        </span>
+      ) : (
+        <span className="text-zinc-600">
+          (pick a size, then click the page)
+        </span>
+      )}
       <Button variant="danger" onClick={() => clearDrawings()}>
         Clear draw + text
       </Button>

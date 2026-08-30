@@ -6,6 +6,7 @@ import { OrderbookPanel } from "@/components/orderbook-panel";
 import { TradePanel } from "@/components/trade-panel";
 import { ChartPanel } from "@/components/chart-panel";
 import { AlertsPanel } from "@/components/alerts-panel";
+import { TradeErrorBoundary } from "@/components/trade-error-boundary";
 import { useGccSocket } from "@/hooks/use-gcc-socket";
 import { WorkspaceProvider } from "@/components/workspace/workspace-context";
 import { WorkspaceToolbar } from "@/components/workspace/workspace-toolbar";
@@ -21,22 +22,24 @@ export default function TradePage() {
   return (
     <WorkspaceProvider>
       <Shell connected={connected}>
-        <WorkspaceSurface ref={surfaceRef} className="space-y-4">
-          <WorkspaceToolbar />
-          <div className="grid gap-4 xl:grid-cols-2">
-            <div className="space-y-4 xl:col-span-2">
-              <ChartPanel />
+        <TradeErrorBoundary name="Trade">
+          <WorkspaceSurface ref={surfaceRef} className="min-h-[70vh] space-y-4">
+            <WorkspaceToolbar />
+            <div className="relative z-10 grid gap-4 xl:grid-cols-2">
+              <div className="space-y-4 xl:col-span-2">
+                <ChartPanel />
+              </div>
+              <OrderbookPanel book={orderbook} />
+              <div className="space-y-4">
+                <TradePanel markPrice={market?.markPriceUsd ?? null} />
+                <AlertsPanel />
+              </div>
             </div>
-            <OrderbookPanel book={orderbook} />
-            <div className="space-y-4">
-              <TradePanel markPrice={market?.markPriceUsd ?? null} />
-              <AlertsPanel />
-            </div>
-          </div>
-          <WorkspaceAnnotationLayer boundsRef={surfaceRef} />
-          <StickyPlacementOverlay boundsRef={surfaceRef} />
-          <StickyNotesLayer />
-        </WorkspaceSurface>
+            <WorkspaceAnnotationLayer boundsRef={surfaceRef} />
+            <StickyPlacementOverlay boundsRef={surfaceRef} />
+            <StickyNotesLayer />
+          </WorkspaceSurface>
+        </TradeErrorBoundary>
       </Shell>
     </WorkspaceProvider>
   );
