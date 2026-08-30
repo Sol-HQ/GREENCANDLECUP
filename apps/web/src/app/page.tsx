@@ -4,6 +4,7 @@ import { Shell } from "@/components/shell";
 import { Card, Stat } from "@/components/ui";
 import { OrderbookPanel } from "@/components/orderbook-panel";
 import { TradePanel } from "@/components/trade-panel";
+import { AlertsPanel } from "@/components/alerts-panel";
 import { useGccSocket } from "@/hooks/use-gcc-socket";
 import { GCC_END, GCC_START } from "@gcc/shared";
 
@@ -44,7 +45,10 @@ export default function HomePage() {
 
         <div className="grid gap-4 xl:grid-cols-2">
           <OrderbookPanel book={orderbook} />
-          <TradePanel markPrice={market?.markPriceUsd ?? null} />
+          <div className="space-y-4">
+            <TradePanel markPrice={market?.markPriceUsd ?? null} />
+            <AlertsPanel />
+          </div>
         </div>
 
         <Card title="System">

@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@gcc/shared": "workspace:*",
+    "@gcc/ta": "workspace:*",
     "@gcc/trading-core": "workspace:*"
   },
   "devDependencies": {

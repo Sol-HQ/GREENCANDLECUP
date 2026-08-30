@@ -4,7 +4,7 @@
   "scripts": {
     "dev": "pnpm --parallel --filter @gcc/server --filter web dev",
     "build": "pnpm -r build",
-    "build:packages": "pnpm --filter @gcc/shared --filter @gcc/risk --filter @gcc/phoenix-client --filter @gcc/trading-core --filter @gcc/bot-engine build",
+    "build:packages": "pnpm --filter @gcc/shared --filter @gcc/ta --filter @gcc/risk --filter @gcc/phoenix-client --filter @gcc/trading-core --filter @gcc/bot-engine build",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
     "gate": "bash scripts/phase1-gate.sh"

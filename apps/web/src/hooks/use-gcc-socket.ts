@@ -6,6 +6,7 @@ import type {
   MarketSnapshot,
   OrderbookSnapshot,
   SystemHealth,
+  TradeAlert,
   WsEvent,
 } from "@gcc/shared";
 import { WS_URL } from "@/lib/utils";
@@ -18,6 +19,7 @@ export function useGccSocket() {
   const [logs, setLogs] = useState<
     Array<{ level: string; message: string; at: string }>
   >([]);
+  const [alerts, setAlerts] = useState<TradeAlert[]>([]);
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
@@ -43,11 +45,14 @@ export function useGccSocket() {
         case "log":
           setLogs((prev) => [payload.data, ...prev].slice(0, 50));
           break;
+        case "alert":
+          setAlerts((prev) => [payload.data, ...prev].slice(0, 30));
+          break;
       }
     };
 
     return () => ws.close();
   }, []);
 
-  return { market, orderbook, metrics, health, logs, connected };
+  return { market, orderbook, metrics, health, logs, alerts, connected };
 }

@@ -2,10 +2,13 @@
 
 import { Shell } from "@/components/shell";
 import { Card, Stat } from "@/components/ui";
+import { GLOSSARY } from "@gcc/shared";
 import { useGccSocket } from "@/hooks/use-gcc-socket";
+import { useNetwork } from "@/components/network-provider";
 
 export default function SystemPage() {
   const { health, logs, connected } = useGccSocket();
+  const { network } = useNetwork();
 
   return (
     <Shell connected={connected}>
@@ -25,6 +28,60 @@ export default function SystemPage() {
             value={health?.shredStreamActive ? "Active" : "Inactive"}
           />
         </div>
+
+        <Card title="Network">
+          <div className="space-y-2 text-sm text-zinc-300">
+            <p>
+              Wallet RPC:{" "}
+              <span className="text-zinc-100">
+                {network?.walletCluster ?? "—"}
+              </span>
+            </p>
+            <p>
+              Trading:{" "}
+              <span className="text-zinc-100">
+                {network?.tradingMode ?? "—"}
+              </span>{" "}
+              · Phoenix: mainnet (GCC)
+            </p>
+            <p className="text-xs text-zinc-500">{GLOSSARY.mainnetVsDevnet.body}</p>
+          </div>
+        </Card>
+
+        <Card title="ShredStream — your speed edge (Phase 2)">
+          <div className="space-y-3 text-sm leading-relaxed text-zinc-300">
+            <p>{GLOSSARY.shredStream.body}</p>
+            <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3 text-xs text-zinc-400">
+              <p className="mb-2 font-medium text-zinc-200">Analogy</p>
+              <p>
+                Normal API = watching the game on TV with a delay. ShredStream =
+                someone texting you each play from the stadium seats in real
+                time. You still need a trading plan (MACD, trend) — ShredStream
+                just lets you act sooner when a big move starts.
+              </p>
+            </div>
+            <ul className="list-inside list-disc space-y-1 text-zinc-400">
+              <li>
+                <strong className="text-zinc-200">What it gives:</strong> see
+                large fills / flow before the orderbook API updates
+              </li>
+              <li>
+                <strong className="text-zinc-200">What it does NOT do:</strong>{" "}
+                draw candles, MACD, or pick entries by itself
+              </li>
+              <li>
+                <strong className="text-zinc-200">When we turn it on:</strong>{" "}
+                NYC VPS + Triton IP + UDP port (deploy script ready)
+              </li>
+              <li>
+                <strong className="text-zinc-200">Status:</strong>{" "}
+                {network?.shredStreamConfigured
+                  ? "Env configured — smoke test on VPS"
+                  : "Not configured yet (expected before Sep 1)"}
+              </li>
+            </ul>
+          </div>
+        </Card>
 
         <Card title="Logs">
           <div className="max-h-96 space-y-2 overflow-y-auto text-xs">

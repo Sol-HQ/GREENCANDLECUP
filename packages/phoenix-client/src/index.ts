@@ -36,6 +36,20 @@ export type PhoenixClientBundle = {
     side: "buy" | "sell";
     baseUnits: string;
   }) => Promise<unknown>;
+  getCandles: (
+    symbol: string,
+    timeframe?: string,
+    limit?: number,
+  ) => Promise<
+    Array<{
+      time: number;
+      open: number;
+      high: number;
+      low: number;
+      close: number;
+      volume: number;
+    }>
+  >;
 };
 
 function tupleToLevels(levels: [number, number][]): OrderbookLevel[] {
@@ -168,6 +182,21 @@ export function createGccPhoenixClient(
     subscribeOrderbook,
     buildLimitOrderIx,
     buildMarketOrderIx,
+    getCandles: async (symbol, timeframe = "15m", limit = 100) => {
+      await ready();
+      const candles = await client.api.candles().getCandles(symbol, {
+        timeframe,
+        limit,
+      });
+      return candles.map((c) => ({
+        time: c.time,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        volume: c.volume,
+      }));
+    },
   };
 }
 

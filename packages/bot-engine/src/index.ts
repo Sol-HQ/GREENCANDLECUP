@@ -2,12 +2,20 @@ import type { TradingCore } from "@gcc/trading-core";
 import type {
   BotConfig,
   BotStatus,
+  CandleTimeframe,
   GccMetrics,
   MarketSnapshot,
 } from "@gcc/shared";
 import { DEFAULT_BOT_CONFIG } from "@gcc/shared";
+import { analyzeCandles, type Candle, type TaAnalysis } from "@gcc/ta";
 
 export type BotLogHandler = (level: "info" | "warn" | "error", message: string) => void;
+
+export type CandleFetcher = (
+  symbol: string,
+  timeframe: CandleTimeframe,
+  limit?: number,
+) => Promise<Candle[]>;
 
 export class BotEngine {
   private config: BotConfig = { ...DEFAULT_BOT_CONFIG };
@@ -21,11 +29,13 @@ export class BotEngine {
     updatedAt: new Date().toISOString(),
   };
   private lastPrice: number | null = null;
-  private priceHistory: number[] = [];
+  private lastAnalysis: TaAnalysis | null = null;
+  private lastSignalAt = 0;
 
   constructor(
     private trading: TradingCore,
     private onLog: BotLogHandler = () => {},
+    private getCandles?: CandleFetcher,
   ) {}
 
   getConfig(): BotConfig {
@@ -40,15 +50,26 @@ export class BotEngine {
     return this.metrics;
   }
 
+  getLastAnalysis(): TaAnalysis | null {
+    return this.lastAnalysis;
+  }
+
   updateConfig(partial: Partial<BotConfig>) {
     this.config = { ...this.config, ...partial };
+    if (this.status === "running") {
+      this.pause();
+      this.start();
+    }
   }
 
   start() {
     if (this.status === "running") return;
     this.status = "running";
     this.config.status = "running";
-    this.onLog("info", `Bot started (${this.config.mode}, ${this.config.strategy})`);
+    this.onLog(
+      "info",
+      `Bot started (${this.config.mode}, ${this.config.strategy}, ${this.config.candleTimeframe}, ${this.config.pollIntervalMs}ms)`,
+    );
     this.timer = setInterval(() => void this.tick(), this.config.pollIntervalMs);
   }
 
@@ -72,16 +93,19 @@ export class BotEngine {
     const price = Number(snapshot.markPriceUsd ?? snapshot.bestBid ?? 0);
     if (!price) return;
     this.lastPrice = price;
-    this.priceHistory.push(price);
-    if (this.priceHistory.length > 20) this.priceHistory.shift();
   }
 
   private async tick() {
     if (this.status !== "running" || !this.lastPrice) return;
+    if (this.config.strategy === "manual") return;
 
     try {
-      const signal = this.computeSignal();
+      const signal = await this.computeSignal();
       if (!signal) return;
+
+      const now = Date.now();
+      if (now - this.lastSignalAt < 15_000) return;
+      this.lastSignalAt = now;
 
       const sizeBase = "0.01";
       const result = await this.trading.buildOrder(
@@ -99,7 +123,8 @@ export class BotEngine {
       this.metrics.volumeUsd += notional;
       this.metrics.tradeCount += 1;
       this.metrics.updatedAt = new Date().toISOString();
-      this.onLog("info", result.message);
+      const reason = this.lastAnalysis?.reason ?? "signal";
+      this.onLog("info", `${result.message} · ${reason}`);
     } catch (error) {
       this.status = "error";
       this.config.status = "error";
@@ -111,26 +136,21 @@ export class BotEngine {
     }
   }
 
-  private computeSignal(): "buy" | "sell" | null {
-    if (this.priceHistory.length < 10) return null;
-    const recent = this.priceHistory.slice(-5);
-    const older = this.priceHistory.slice(-10, -5);
-    const recentAvg = recent.reduce((a, b) => a + b, 0) / recent.length;
-    const olderAvg = older.reduce((a, b) => a + b, 0) / older.length;
-    const delta = (recentAvg - olderAvg) / olderAvg;
+  private async computeSignal(): Promise<"buy" | "sell" | null> {
+    if (!this.getCandles) return null;
+    if (this.config.strategy === "manual") return null;
+    const candles = await this.getCandles(
+      this.config.symbol,
+      this.config.candleTimeframe,
+      120,
+    );
+    if (candles.length < 30) return null;
 
-    if (this.config.strategy === "momentum") {
-      if (delta > 0.0005) return "buy";
-      if (delta < -0.0005) return "sell";
-      return null;
-    }
-
-    if (this.config.strategy === "mean_reversion") {
-      if (delta < -0.0005) return "buy";
-      if (delta > 0.0005) return "sell";
-      return null;
-    }
-
-    return null;
+    const analysis = analyzeCandles(
+      candles,
+      this.config.strategy as "trend_macd" | "pullback" | "momentum" | "mean_reversion",
+    );
+    this.lastAnalysis = analysis;
+    return analysis.signal;
   }
 }

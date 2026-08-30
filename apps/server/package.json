@@ -14,6 +14,7 @@
     "@gcc/phoenix-client": "workspace:*",
     "@gcc/risk": "workspace:*",
     "@gcc/shared": "workspace:*",
+    "@gcc/ta": "workspace:*",
     "@gcc/trading-core": "workspace:*",
     "@hono/node-server": "^1.14.1",
     "dotenv": "^16.4.7",

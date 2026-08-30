@@ -32,12 +32,45 @@ export const RiskLimitsSchema = z.object({
 });
 export type RiskLimits = z.infer<typeof RiskLimitsSchema>;
 
+export const CandleTimeframeSchema = z.enum([
+  "15s",
+  "30s",
+  "1m",
+  "5m",
+  "15m",
+  "1h",
+  "4h",
+]);
+export type CandleTimeframe = z.infer<typeof CandleTimeframeSchema>;
+
+export const SolanaClusterSchema = z.enum(["mainnet-beta", "devnet"]);
+export type SolanaCluster = z.infer<typeof SolanaClusterSchema>;
+
+export const NetworkConfigSchema = z.object({
+  walletCluster: SolanaClusterSchema.default("mainnet-beta"),
+  tradingMode: TradeModeSchema.default("paper"),
+  phoenixNetwork: z.literal("mainnet").default("mainnet"),
+  shredStreamConfigured: z.boolean().default(false),
+  gccUsesMainnet: z.literal(true).default(true),
+});
+export type NetworkConfig = z.infer<typeof NetworkConfigSchema>;
+
+export const BotStrategySchema = z.enum([
+  "trend_macd",
+  "pullback",
+  "momentum",
+  "mean_reversion",
+  "manual",
+]);
+export type BotStrategy = z.infer<typeof BotStrategySchema>;
+
 export const BotConfigSchema = z.object({
   symbol: z.string().default("SOL"),
   mode: TradeModeSchema.default("paper"),
   status: BotStatusSchema.default("stopped"),
-  strategy: z.enum(["momentum", "mean_reversion", "manual"]).default("momentum"),
-  pollIntervalMs: z.number().int().positive().default(5000),
+  strategy: BotStrategySchema.default("trend_macd"),
+  candleTimeframe: CandleTimeframeSchema.default("1m"),
+  pollIntervalMs: z.number().int().positive().default(1000),
 });
 export type BotConfig = z.infer<typeof BotConfigSchema>;
 
@@ -68,6 +101,16 @@ export const SystemHealthSchema = z.object({
   lastError: z.string().nullable(),
 });
 export type SystemHealth = z.infer<typeof SystemHealthSchema>;
+
+export const TradeAlertSchema = z.object({
+  id: z.string(),
+  level: z.enum(["info", "signal", "warn", "error"]),
+  title: z.string(),
+  message: z.string(),
+  symbol: z.string().optional(),
+  at: z.string(),
+});
+export type TradeAlert = z.infer<typeof TradeAlertSchema>;
 
 export const MarketSnapshotSchema = z.object({
   symbol: z.string(),
@@ -121,9 +164,22 @@ export const WsEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("positions"), data: z.array(PositionViewSchema) }),
   z.object({ type: z.literal("orders"), data: z.array(OpenOrderViewSchema) }),
   z.object({ type: z.literal("log"), data: z.object({ level: z.string(), message: z.string(), at: z.string() }) }),
+  z.object({ type: z.literal("alert"), data: TradeAlertSchema }),
+  z.object({
+    type: z.literal("network"),
+    data: NetworkConfigSchema.extend({
+      walletRpcUrl: z.string(),
+    }),
+  }),
 ]);
 export type WsEvent = z.infer<typeof WsEventSchema>;
 
 export const DEFAULT_RISK_LIMITS: RiskLimits = RiskLimitsSchema.parse({});
 
 export const DEFAULT_BOT_CONFIG: BotConfig = BotConfigSchema.parse({});
+
+export {
+  GLOSSARY,
+  STRATEGY_HELP,
+  TIMEFRAME_HELP,
+} from "./glossary.js";

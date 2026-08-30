@@ -15,11 +15,7 @@ cp .env.example .env
 # Add HELIUS_RPC_URL with your API key
 
 pnpm install
-pnpm --filter @gcc/shared build
-pnpm --filter @gcc/risk build
-pnpm --filter @gcc/phoenix-client build
-pnpm --filter @gcc/trading-core build
-pnpm --filter @gcc/bot-engine build
+pnpm build:packages
 
 # Terminal 1 — API + bot
 pnpm --filter @gcc/server dev
@@ -30,7 +26,13 @@ pnpm --filter web dev
 
 Open http://localhost:3000
 
+**Project memory:** append-only session log → [`MEMORY.md`](./MEMORY.md)  
+**Ordered tasks:** [`CHECKLIST.md`](./CHECKLIST.md)  
+**Dev reset after 500 errors:** `powershell -File scripts\dev-reset.ps1`
+
 ## Phase 1 pass checklist (before paying for Vultr)
+
+See **[CHECKLIST.md](./CHECKLIST.md)** for the full ordered checklist. Quick summary:
 
 - [ ] Dashboard loads locally with clean UI
 - [ ] Live SOL orderbook updates

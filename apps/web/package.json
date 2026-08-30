@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@gcc/shared": "workspace:*",
+    "@gcc/ta": "workspace:*",
     "@solana/wallet-adapter-base": "^0.9.23",
     "@solana/wallet-adapter-phantom": "^0.9.24",
     "@solana/wallet-adapter-react": "^0.15.35",
@@ -19,6 +20,7 @@
     "bs58": "^6.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "lightweight-charts": "^5.2.1",
     "lucide-react": "^0.484.0",
     "next": "15.5.24",
     "react": "19.1.0",

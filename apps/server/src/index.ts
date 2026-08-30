@@ -16,20 +16,41 @@ import { WebSocketServer, WebSocket } from "ws";
 import { createGccPhoenixClient } from "@gcc/phoenix-client";
 import { TradingCore } from "@gcc/trading-core";
 import { BotEngine } from "@gcc/bot-engine";
+import { randomUUID } from "node:crypto";
 import {
   BotConfigSchema,
+  BotStrategySchema,
+  CandleTimeframeSchema,
   DEFAULT_RISK_LIMITS,
+  NetworkConfigSchema,
   PlaceOrderRequestSchema,
   RiskLimitsSchema,
+  SolanaClusterSchema,
+  type TradeAlert,
   type WsEvent,
+  type SolanaCluster,
 } from "@gcc/shared";
+import { analyzeCandles } from "@gcc/ta";
 import { RiskGate } from "@gcc/risk";
-import { getHeliusRpcUrl } from "./env.js";
+import { getHeliusRpcUrl, maskRpcUrl } from "./env.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const API_KEY = process.env.API_KEY ?? "dev";
 const RPC_URL = getHeliusRpcUrl();
 const SYMBOL = "SOL";
+const SERVER_POLL_MS = Number(process.env.SERVER_POLL_MS ?? 1000);
+
+let walletCluster: SolanaCluster =
+  process.env.SOLANA_CLUSTER === "devnet" ? "devnet" : "mainnet-beta";
+
+const networkSnapshot = () =>
+  NetworkConfigSchema.parse({
+    walletCluster,
+    tradingMode: bot.getConfig().mode,
+    phoenixNetwork: "mainnet",
+    shredStreamConfigured: Boolean(process.env.SHREDSTREAM_UDP_PORT),
+    gccUsesMainnet: true,
+  });
 
 const phoenix = createGccPhoenixClient({
   rpcUrl: RPC_URL,
@@ -47,14 +68,45 @@ const trading = new TradingCore(
 );
 
 const logs: Array<{ level: string; message: string; at: string }> = [];
+const alerts: TradeAlert[] = [];
+let lastAlertAt = 0;
+let lastMarkPrice: number | null = null;
+
+const pushAlert = (partial: Omit<TradeAlert, "id" | "at">) => {
+  const entry: TradeAlert = {
+    ...partial,
+    id: randomUUID(),
+    at: new Date().toISOString(),
+  };
+  alerts.unshift(entry);
+  if (alerts.length > 50) alerts.pop();
+  broadcast({ type: "alert", data: entry });
+};
+
 const pushLog = (level: "info" | "warn" | "error", message: string) => {
   const entry = { level, message, at: new Date().toISOString() };
   logs.unshift(entry);
   if (logs.length > 100) logs.pop();
   broadcast({ type: "log", data: entry });
+  if (
+    level === "info" &&
+    (message.startsWith("Paper") || message.includes("order"))
+  ) {
+    pushAlert({
+      level: "signal",
+      title: "Bot trade signal",
+      message,
+      symbol: SYMBOL,
+    });
+  }
 };
 
-const bot = new BotEngine(trading, pushLog);
+const bot = new BotEngine(
+  trading,
+  pushLog,
+  async (symbol, timeframe, limit = 120) =>
+    phoenix.getCandles(symbol, timeframe, limit),
+);
 
 const app = new Hono();
 app.use("/*", cors());
@@ -105,7 +157,75 @@ app.get("/api/orderbook/:symbol", async (c) => {
 
 app.get("/api/metrics", (c) => c.json(bot.getMetrics()));
 
+app.get("/api/alerts", (c) => c.json(alerts));
+
+app.get("/api/candles/:symbol", async (c) => {
+  try {
+    const symbol = c.req.param("symbol");
+    const timeframe = c.req.query("timeframe") ?? "15m";
+    const limit = Number(c.req.query("limit") ?? "100");
+    return c.json(await phoenix.getCandles(symbol, timeframe, limit));
+  } catch (error) {
+    return c.json(
+      { error: error instanceof Error ? error.message : "Candles failed" },
+      503,
+    );
+  }
+});
+
+app.get("/api/ta/:symbol", async (c) => {
+  try {
+    const symbol = c.req.param("symbol");
+    const timeframe = CandleTimeframeSchema.parse(
+      c.req.query("timeframe") ?? "1m",
+    );
+    const strategy = BotStrategySchema.parse(
+      c.req.query("strategy") ?? "trend_macd",
+    );
+    if (strategy === "manual") {
+      return c.json({ trend: "flat", signal: null, reason: "Manual mode" });
+    }
+    const candles = await phoenix.getCandles(symbol, timeframe, 120);
+    return c.json(analyzeCandles(candles, strategy));
+  } catch (error) {
+    return c.json(
+      { error: error instanceof Error ? error.message : "TA failed" },
+      503,
+    );
+  }
+});
+
 app.get("/api/risk", (c) => c.json(riskGate.getLimits()));
+
+app.get("/api/network", (c) =>
+  c.json({
+    ...networkSnapshot(),
+    walletRpcUrl: getHeliusRpcUrl(walletCluster),
+    walletRpcMasked: maskRpcUrl(getHeliusRpcUrl(walletCluster)),
+    botRpcMasked: maskRpcUrl(RPC_URL),
+  }),
+);
+
+app.patch("/api/network", async (c) => {
+  const body = NetworkConfigSchema.partial()
+    .extend({ walletCluster: SolanaClusterSchema.optional() })
+    .parse(await c.req.json());
+  if (body.walletCluster) walletCluster = body.walletCluster;
+  if (body.tradingMode) bot.updateConfig({ mode: body.tradingMode });
+  broadcast({
+    type: "network",
+    data: {
+      ...networkSnapshot(),
+      walletRpcUrl: getHeliusRpcUrl(walletCluster),
+    },
+  });
+  return c.json({
+    ...networkSnapshot(),
+    walletRpcUrl: getHeliusRpcUrl(walletCluster),
+    walletRpcMasked: maskRpcUrl(getHeliusRpcUrl(walletCluster)),
+    botRpcMasked: maskRpcUrl(RPC_URL),
+  });
+});
 
 app.patch("/api/risk", async (c) => {
   const body = RiskLimitsSchema.parse(await c.req.json());
@@ -114,7 +234,11 @@ app.patch("/api/risk", async (c) => {
 });
 
 app.get("/api/bot", (c) =>
-  c.json({ config: bot.getConfig(), status: bot.getStatus() }),
+  c.json({
+    config: bot.getConfig(),
+    status: bot.getStatus(),
+    analysis: bot.getLastAnalysis(),
+  }),
 );
 
 app.patch("/api/bot", async (c) => {
@@ -192,6 +316,21 @@ async function pollLoop() {
     try {
       const market = await phoenix.getMarketSnapshot(SYMBOL);
       bot.onMarketUpdate(market);
+      const mark = Number(market.markPriceUsd ?? 0);
+      const now = Date.now();
+      if (lastMarkPrice && mark && now - lastAlertAt > 60_000) {
+        const pct = ((mark - lastMarkPrice) / lastMarkPrice) * 100;
+        if (Math.abs(pct) >= 0.35) {
+          pushAlert({
+            level: "info",
+            title: `SOL ${pct > 0 ? "rally" : "dip"} ${Math.abs(pct).toFixed(2)}%`,
+            message: `$${lastMarkPrice.toFixed(2)} → $${mark.toFixed(2)} (${SERVER_POLL_MS}ms tick)`,
+            symbol: SYMBOL,
+          });
+          lastAlertAt = now;
+        }
+      }
+      if (mark) lastMarkPrice = mark;
       const latency = Date.now() - start;
       broadcast({ type: "market", data: market });
       broadcast({ type: "metrics", data: bot.getMetrics() });
@@ -218,7 +357,7 @@ async function pollLoop() {
         },
       });
     }
-  }, 5000);
+  }, SERVER_POLL_MS);
 }
 
 void pollLoop();

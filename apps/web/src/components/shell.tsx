@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { cn } from "@/lib/utils";
 import { Badge } from "./ui";
+import { NetworkToggle } from "./network-toggle";
 
 const links = [
   { href: "/", label: "Overview" },
@@ -38,7 +39,10 @@ export function Shell({
             </div>
             <Badge ok={connected}>{connected ? "Live" : "Offline"}</Badge>
           </div>
-          <WalletMultiButton className="!bg-zinc-800 !text-sm" />
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            <NetworkToggle />
+            <WalletMultiButton className="!bg-zinc-800 !text-sm" />
+          </div>
         </div>
       </header>
 
