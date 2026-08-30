@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import type { DrawTool, StickyNote, StickySize, Stroke, TextLabel } from "./types";
+import { STICKY_DIMENSIONS } from "./types";
 
 const STROKES_KEY = "gcc-workspace-strokes";
 const NOTES_KEY = "gcc-workspace-notes";
@@ -18,12 +19,14 @@ const LABELS_KEY = "gcc-workspace-labels";
 type WorkspaceContextValue = {
   tool: DrawTool;
   setTool: (t: DrawTool) => void;
+  resetTools: () => void;
   color: string;
   setColor: (c: string) => void;
   strokes: Stroke[];
   addStroke: (s: Stroke) => void;
   eraseAt: (x: number, y: number, radius: number) => void;
   clearDrawings: () => void;
+  clearAllNotes: () => void;
   labels: TextLabel[];
   addLabel: (label: Omit<TextLabel, "id">) => void;
   updateLabel: (id: string, patch: Partial<TextLabel>) => void;
@@ -34,6 +37,7 @@ type WorkspaceContextValue = {
   removeNote: (id: string) => void;
   pendingStickySize: StickySize | null;
   setPendingStickySize: (s: StickySize | null) => void;
+  isDrawMode: boolean;
 };
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
@@ -59,12 +63,25 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   );
   const [hydrated, setHydrated] = useState(false);
 
+  const resetTools = useCallback(() => {
+    setTool("select");
+    setPendingStickySize(null);
+  }, []);
+
   useEffect(() => {
     setStrokes(loadJson(STROKES_KEY, []));
     setLabels(loadJson(LABELS_KEY, []));
     setNotes(loadJson(NOTES_KEY, []));
     setHydrated(true);
   }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") resetTools();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [resetTools]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -94,11 +111,24 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setLabels((prev) =>
       prev.filter((l) => Math.hypot(l.x - x, l.y - y) > radius + 20),
     );
+    setNotes((prev) =>
+      prev.filter((n) => {
+        const dim = STICKY_DIMENSIONS[n.size];
+        const cx = n.x + dim.w / 2;
+        const cy = n.y + dim.h / 2;
+        return Math.hypot(cx - x, cy - y) > radius + Math.max(dim.w, dim.h) / 2;
+      }),
+    );
   }, []);
 
   const clearDrawings = useCallback(() => {
     setStrokes([]);
     setLabels([]);
+  }, []);
+
+  const clearAllNotes = useCallback(() => {
+    setNotes([]);
+    setPendingStickySize(null);
   }, []);
 
   const addLabel = useCallback((label: Omit<TextLabel, "id">) => {
@@ -145,16 +175,20 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setNotes((prev) => prev.filter((n) => n.id !== id));
   }, []);
 
+  const isDrawMode = tool !== "select" || pendingStickySize !== null;
+
   const value = useMemo(
     () => ({
       tool,
       setTool,
+      resetTools,
       color,
       setColor,
       strokes,
       addStroke,
       eraseAt,
       clearDrawings,
+      clearAllNotes,
       labels,
       addLabel,
       updateLabel,
@@ -165,14 +199,17 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       removeNote,
       pendingStickySize,
       setPendingStickySize,
+      isDrawMode,
     }),
     [
       tool,
+      resetTools,
       color,
       strokes,
       addStroke,
       eraseAt,
       clearDrawings,
+      clearAllNotes,
       labels,
       addLabel,
       updateLabel,
@@ -182,6 +219,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       updateNote,
       removeNote,
       pendingStickySize,
+      isDrawMode,
     ],
   );
 

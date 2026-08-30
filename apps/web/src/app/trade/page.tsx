@@ -11,34 +11,40 @@ import { useGccSocket } from "@/hooks/use-gcc-socket";
 import { WorkspaceProvider } from "@/components/workspace/workspace-context";
 import { WorkspaceToolbar } from "@/components/workspace/workspace-toolbar";
 import { StickyNotesLayer } from "@/components/workspace/sticky-notes-layer";
-import { WorkspaceSurface } from "@/components/workspace/workspace-surface";
 import { WorkspaceAnnotationLayer } from "@/components/workspace/workspace-annotation-layer";
 import { StickyPlacementOverlay } from "@/components/workspace/sticky-placement-overlay";
 
 export default function TradePage() {
   const { market, orderbook, connected } = useGccSocket();
-  const surfaceRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
 
   return (
     <WorkspaceProvider>
       <Shell connected={connected}>
         <TradeErrorBoundary name="Trade">
-          <WorkspaceSurface ref={surfaceRef} className="min-h-[70vh] space-y-4">
-            <WorkspaceToolbar />
-            <div className="relative z-10 grid gap-4 xl:grid-cols-2">
-              <div className="space-y-4 xl:col-span-2">
-                <ChartPanel />
-              </div>
-              <OrderbookPanel book={orderbook} />
-              <div className="space-y-4">
-                <TradePanel markPrice={market?.markPriceUsd ?? null} />
-                <AlertsPanel />
-              </div>
+          <div className="space-y-4">
+            {/* Toolbar always on top — never covered by draw canvas */}
+            <div className="relative z-[100]">
+              <WorkspaceToolbar />
             </div>
-            <WorkspaceAnnotationLayer boundsRef={surfaceRef} />
-            <StickyPlacementOverlay boundsRef={surfaceRef} />
-            <StickyNotesLayer />
-          </WorkspaceSurface>
+
+            {/* Draw/sticky layers only cover this content region */}
+            <div ref={contentRef} className="relative min-h-[60vh]">
+              <div className="relative z-10 grid gap-4 xl:grid-cols-2">
+                <div className="space-y-4 xl:col-span-2">
+                  <ChartPanel />
+                </div>
+                <OrderbookPanel book={orderbook} />
+                <div className="space-y-4">
+                  <TradePanel markPrice={market?.markPriceUsd ?? null} />
+                  <AlertsPanel />
+                </div>
+              </div>
+              <WorkspaceAnnotationLayer boundsRef={contentRef} />
+              <StickyPlacementOverlay boundsRef={contentRef} />
+              <StickyNotesLayer />
+            </div>
+          </div>
         </TradeErrorBoundary>
       </Shell>
     </WorkspaceProvider>

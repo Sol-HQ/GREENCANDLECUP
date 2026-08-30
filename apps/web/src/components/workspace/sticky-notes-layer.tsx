@@ -18,7 +18,7 @@ export function StickyNotesLayer() {
   if (notes.length === 0) return null;
 
   return (
-    <div className="pointer-events-none absolute inset-0 z-50">
+    <div className="pointer-events-none absolute inset-0 z-[60]">
       {notes.map((note) => {
         const dim = STICKY_DIMENSIONS[note.size];
         return (
@@ -32,10 +32,12 @@ export function StickyNotesLayer() {
               height: dim.h,
               backgroundColor: note.color,
             }}
+            onPointerDown={(e) => e.stopPropagation()}
           >
             <div
               className="flex cursor-move items-center justify-between rounded-t-lg bg-black/10 px-2 py-1 text-[10px] font-medium text-zinc-800"
               onPointerDown={(e) => {
+                if ((e.target as HTMLElement).closest("button")) return;
                 e.stopPropagation();
                 drag.current = {
                   id: note.id,
@@ -61,17 +63,26 @@ export function StickyNotesLayer() {
               <div className="flex gap-1">
                 <button
                   type="button"
-                  className="rounded px-1 hover:bg-black/10"
-                  onClick={() =>
-                    setColorPickerFor(colorPickerFor === note.id ? null : note.id)
-                  }
+                  className="rounded px-1.5 py-0.5 hover:bg-black/15"
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setColorPickerFor(colorPickerFor === note.id ? null : note.id);
+                  }}
                 >
                   color
                 </button>
                 <button
                   type="button"
-                  className="rounded px-1 hover:bg-black/10"
-                  onClick={() => removeNote(note.id)}
+                  className="rounded bg-black/10 px-1.5 py-0.5 font-bold hover:bg-rose-600 hover:text-white"
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    removeNote(note.id);
+                  }}
                 >
                   ×
                 </button>
@@ -85,7 +96,8 @@ export function StickyNotesLayer() {
                     type="button"
                     className="h-4 w-4 rounded-full border border-zinc-600"
                     style={{ backgroundColor: c }}
-                    onClick={() => {
+                    onClick={(e) => {
+                      e.stopPropagation();
                       updateNote(note.id, { color: c });
                       setColorPickerFor(null);
                     }}

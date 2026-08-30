@@ -25,17 +25,22 @@ export function WorkspaceAnnotationLayer({ boundsRef }: Props) {
     points: Array<{ x: number; y: number }>;
   } | null>(null);
 
+  const isActive = tool === "pen" || tool === "eraser" || tool === "text";
+
   useEffect(() => {
     const canvas = canvasRef.current;
     const bounds = boundsRef.current;
     if (!canvas || !bounds) return;
 
     const resize = () => {
-      canvas.width = bounds.clientWidth;
-      canvas.height = bounds.clientHeight;
+      const w = bounds.clientWidth;
+      const h = bounds.clientHeight;
+      if (w === 0 || h === 0) return;
+      canvas.width = w;
+      canvas.height = h;
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.clearRect(0, 0, w, h);
       for (const stroke of strokes) {
         if (stroke.points.length < 2) continue;
         ctx.strokeStyle = stroke.color;
@@ -65,14 +70,15 @@ export function WorkspaceAnnotationLayer({ boundsRef }: Props) {
   };
 
   const onPointerDown = (e: React.PointerEvent) => {
-    if (tool === "select") return;
+    if (!isActive) return;
+    e.stopPropagation();
     const p = localPoint(e);
     if (tool === "text") {
       addLabel({ x: p.x, y: p.y, text: "Label", color });
       return;
     }
     if (tool === "eraser") {
-      eraseAt(p.x, p.y, 16);
+      eraseAt(p.x, p.y, 24);
       return;
     }
     drawing.current = { id: crypto.randomUUID(), points: [p] };
@@ -80,9 +86,10 @@ export function WorkspaceAnnotationLayer({ boundsRef }: Props) {
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
+    if (!isActive) return;
     const p = localPoint(e);
     if (tool === "eraser" && e.buttons === 1) {
-      eraseAt(p.x, p.y, 16);
+      eraseAt(p.x, p.y, 24);
       return;
     }
     if (!drawing.current || tool !== "pen") return;
@@ -113,39 +120,67 @@ export function WorkspaceAnnotationLayer({ boundsRef }: Props) {
     drawing.current = null;
   };
 
-  const interactive = tool === "pen" || tool === "eraser" || tool === "text";
-
   return (
     <div className="pointer-events-none absolute inset-0 z-20">
+      {isActive ? (
+        <div className="pointer-events-none absolute left-1/2 top-2 z-30 -translate-x-1/2 rounded-lg bg-emerald-500/20 px-3 py-1 text-xs text-emerald-200">
+          {tool === "pen" && "Drawing — press Esc or Done to exit"}
+          {tool === "eraser" && "Eraser — drag over marks or stickies"}
+          {tool === "text" && "Click to place text"}
+        </div>
+      ) : null}
       <canvas
         ref={canvasRef}
-        className={`absolute inset-0 ${interactive ? "pointer-events-auto cursor-crosshair" : ""}`}
+        className={`absolute inset-0 ${isActive ? "pointer-events-auto cursor-crosshair" : ""}`}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerLeave={onPointerUp}
       />
       {labels.map((label) => (
-        <div
+        <TextLabelChip
           key={label.id}
-          className="pointer-events-auto absolute min-w-[40px]"
-          style={{ left: label.x, top: label.y }}
-        >
-          <input
-            className="rounded border border-zinc-700/80 bg-black/60 px-2 py-0.5 text-sm font-medium outline-none"
-            style={{ color: label.color }}
-            value={label.text}
-            onChange={(e) => updateLabel(label.id, { text: e.target.value })}
-          />
-          <button
-            type="button"
-            className="ml-1 text-[10px] text-zinc-500 hover:text-zinc-300"
-            onClick={() => removeLabel(label.id)}
-          >
-            ×
-          </button>
-        </div>
+          label={label}
+          onChange={(text) => updateLabel(label.id, { text })}
+          onRemove={() => removeLabel(label.id)}
+        />
       ))}
+    </div>
+  );
+}
+
+function TextLabelChip({
+  label,
+  onChange,
+  onRemove,
+}: {
+  label: { id: string; x: number; y: number; text: string; color: string };
+  onChange: (text: string) => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div
+      className="pointer-events-auto absolute z-30 flex items-center gap-1"
+      style={{ left: label.x, top: label.y }}
+    >
+      <input
+        className="rounded border border-zinc-700/80 bg-black/70 px-2 py-0.5 text-sm font-medium outline-none"
+        style={{ color: label.color }}
+        value={label.text}
+        onChange={(e) => onChange(e.target.value)}
+        onPointerDown={(e) => e.stopPropagation()}
+      />
+      <button
+        type="button"
+        className="rounded bg-black/60 px-1.5 py-0.5 text-sm text-zinc-300 hover:bg-rose-900 hover:text-white"
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          onRemove();
+        }}
+      >
+        ×
+      </button>
     </div>
   );
 }

@@ -31,6 +31,7 @@ export function PhoenixGccChartInner({
   const macdRef = useRef<ISeriesApi<"Line"> | null>(null);
   const signalRef = useRef<ISeriesApi<"Line"> | null>(null);
   const histRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const fittedRef = useRef(false);
   const [trend, setTrend] = useState<string>("—");
   const [lastClose, setLastClose] = useState<string>("—");
   const [chartError, setChartError] = useState<string | null>(null);
@@ -152,7 +153,10 @@ export function PhoenixGccChartInner({
 
         setTrend(detectTrend(closes));
         setLastClose(rows.at(-1)?.close.toFixed(2) ?? "—");
-        chartRef.current?.timeScale().fitContent();
+        if (!fittedRef.current) {
+          chartRef.current?.timeScale().fitContent();
+          fittedRef.current = true;
+        }
         setChartError(null);
       } catch (err) {
         if (active) {
@@ -164,10 +168,11 @@ export function PhoenixGccChartInner({
     };
 
     void load();
-    const id = setInterval(() => void load(), 3000);
+    const id = setInterval(() => void load(), 5000);
     return () => {
       active = false;
       clearInterval(id);
+      fittedRef.current = false;
     };
   }, [symbol, timeframe]);
 
