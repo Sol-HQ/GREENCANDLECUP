@@ -1,4 +1,4 @@
-export type DrawTool = "select" | "pen" | "eraser";
+export type DrawTool = "select" | "pen" | "eraser" | "text";
 
 export type StickySize = "sm" | "md" | "lg";
 
@@ -7,6 +7,14 @@ export type Stroke = {
   points: Array<{ x: number; y: number }>;
   color: string;
   width: number;
+};
+
+export type TextLabel = {
+  id: string;
+  x: number;
+  y: number;
+  text: string;
+  color: string;
 };
 
 export type StickyNote = {

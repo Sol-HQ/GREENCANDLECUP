@@ -9,10 +9,11 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { DrawTool, StickyNote, StickySize, Stroke } from "./types";
+import type { DrawTool, StickyNote, StickySize, Stroke, TextLabel } from "./types";
 
 const STROKES_KEY = "gcc-workspace-strokes";
 const NOTES_KEY = "gcc-workspace-notes";
+const LABELS_KEY = "gcc-workspace-labels";
 
 type WorkspaceContextValue = {
   tool: DrawTool;
@@ -20,12 +21,15 @@ type WorkspaceContextValue = {
   color: string;
   setColor: (c: string) => void;
   strokes: Stroke[];
-  setStrokes: (s: Stroke[]) => void;
   addStroke: (s: Stroke) => void;
   eraseAt: (x: number, y: number, radius: number) => void;
   clearDrawings: () => void;
+  labels: TextLabel[];
+  addLabel: (label: Omit<TextLabel, "id">) => void;
+  updateLabel: (id: string, patch: Partial<TextLabel>) => void;
+  removeLabel: (id: string) => void;
   notes: StickyNote[];
-  addNote: (size: StickySize, noteColor: string, x?: number, y?: number) => void;
+  addNote: (size: StickySize, noteColor: string, x: number, y: number) => void;
   updateNote: (id: string, patch: Partial<StickyNote>) => void;
   removeNote: (id: string) => void;
   pendingStickySize: StickySize | null;
@@ -48,6 +52,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [tool, setTool] = useState<DrawTool>("select");
   const [color, setColor] = useState("#facc15");
   const [strokes, setStrokes] = useState<Stroke[]>([]);
+  const [labels, setLabels] = useState<TextLabel[]>([]);
   const [notes, setNotes] = useState<StickyNote[]>([]);
   const [pendingStickySize, setPendingStickySize] = useState<StickySize | null>(
     null,
@@ -56,6 +61,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     setStrokes(loadJson(STROKES_KEY, []));
+    setLabels(loadJson(LABELS_KEY, []));
     setNotes(loadJson(NOTES_KEY, []));
     setHydrated(true);
   }, []);
@@ -64,6 +70,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     if (!hydrated) return;
     localStorage.setItem(STROKES_KEY, JSON.stringify(strokes));
   }, [strokes, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    localStorage.setItem(LABELS_KEY, JSON.stringify(labels));
+  }, [labels, hydrated]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -77,24 +88,42 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const eraseAt = useCallback((x: number, y: number, radius: number) => {
     setStrokes((prev) =>
       prev.filter((stroke) =>
-        stroke.points.every(
-          (p) => Math.hypot(p.x - x, p.y - y) > radius,
-        ),
+        stroke.points.every((p) => Math.hypot(p.x - x, p.y - y) > radius),
       ),
+    );
+    setLabels((prev) =>
+      prev.filter((l) => Math.hypot(l.x - x, l.y - y) > radius + 20),
     );
   }, []);
 
-  const clearDrawings = useCallback(() => setStrokes([]), []);
+  const clearDrawings = useCallback(() => {
+    setStrokes([]);
+    setLabels([]);
+  }, []);
+
+  const addLabel = useCallback((label: Omit<TextLabel, "id">) => {
+    setLabels((prev) => [...prev, { ...label, id: crypto.randomUUID() }]);
+    setTool("select");
+  }, []);
+
+  const updateLabel = useCallback((id: string, patch: Partial<TextLabel>) => {
+    setLabels((prev) =>
+      prev.map((l) => (l.id === id ? { ...l, ...patch } : l)),
+    );
+  }, []);
+
+  const removeLabel = useCallback((id: string) => {
+    setLabels((prev) => prev.filter((l) => l.id !== id));
+  }, []);
 
   const addNote = useCallback(
-    (size: StickySize, noteColor: string, x?: number, y?: number) => {
-      const id = crypto.randomUUID();
+    (size: StickySize, noteColor: string, x: number, y: number) => {
       setNotes((prev) => [
         ...prev,
         {
-          id,
-          x: x ?? 80 + prev.length * 24,
-          y: y ?? 80 + prev.length * 24,
+          id: crypto.randomUUID(),
+          x,
+          y,
           size,
           color: noteColor,
           text: "",
@@ -123,10 +152,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       color,
       setColor,
       strokes,
-      setStrokes,
       addStroke,
       eraseAt,
       clearDrawings,
+      labels,
+      addLabel,
+      updateLabel,
+      removeLabel,
       notes,
       addNote,
       updateNote,
@@ -141,6 +173,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       addStroke,
       eraseAt,
       clearDrawings,
+      labels,
+      addLabel,
+      updateLabel,
+      removeLabel,
       notes,
       addNote,
       updateNote,

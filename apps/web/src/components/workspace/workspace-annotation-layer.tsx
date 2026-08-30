@@ -4,16 +4,26 @@ import { useEffect, useRef } from "react";
 import { useWorkspace } from "./workspace-context";
 
 type Props = {
-  /** CSS selector for the region to map pointer coords (chart card). */
   boundsRef: React.RefObject<HTMLElement | null>;
 };
 
-export function DrawingLayer({ boundsRef }: Props) {
+export function WorkspaceAnnotationLayer({ boundsRef }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const { tool, color, strokes, addStroke, eraseAt } = useWorkspace();
-  const drawing = useRef<{ id: string; points: Array<{ x: number; y: number }> } | null>(
-    null,
-  );
+  const {
+    tool,
+    color,
+    strokes,
+    labels,
+    addStroke,
+    eraseAt,
+    addLabel,
+    updateLabel,
+    removeLabel,
+  } = useWorkspace();
+  const drawing = useRef<{
+    id: string;
+    points: Array<{ x: number; y: number }>;
+  } | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -57,8 +67,12 @@ export function DrawingLayer({ boundsRef }: Props) {
   const onPointerDown = (e: React.PointerEvent) => {
     if (tool === "select") return;
     const p = localPoint(e);
+    if (tool === "text") {
+      addLabel({ x: p.x, y: p.y, text: "Label", color });
+      return;
+    }
     if (tool === "eraser") {
-      eraseAt(p.x, p.y, 14);
+      eraseAt(p.x, p.y, 16);
       return;
     }
     drawing.current = { id: crypto.randomUUID(), points: [p] };
@@ -68,7 +82,7 @@ export function DrawingLayer({ boundsRef }: Props) {
   const onPointerMove = (e: React.PointerEvent) => {
     const p = localPoint(e);
     if (tool === "eraser" && e.buttons === 1) {
-      eraseAt(p.x, p.y, 14);
+      eraseAt(p.x, p.y, 16);
       return;
     }
     if (!drawing.current || tool !== "pen") return;
@@ -99,16 +113,39 @@ export function DrawingLayer({ boundsRef }: Props) {
     drawing.current = null;
   };
 
-  const interactive = tool === "pen" || tool === "eraser";
+  const interactive = tool === "pen" || tool === "eraser" || tool === "text";
 
   return (
-    <canvas
-      ref={canvasRef}
-      className={`absolute inset-0 z-20 ${interactive ? "cursor-crosshair" : "pointer-events-none"}`}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
-      onPointerLeave={onPointerUp}
-    />
+    <div className="pointer-events-none absolute inset-0 z-20">
+      <canvas
+        ref={canvasRef}
+        className={`absolute inset-0 ${interactive ? "pointer-events-auto cursor-crosshair" : ""}`}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerLeave={onPointerUp}
+      />
+      {labels.map((label) => (
+        <div
+          key={label.id}
+          className="pointer-events-auto absolute min-w-[40px]"
+          style={{ left: label.x, top: label.y }}
+        >
+          <input
+            className="rounded border border-zinc-700/80 bg-black/60 px-2 py-0.5 text-sm font-medium outline-none"
+            style={{ color: label.color }}
+            value={label.text}
+            onChange={(e) => updateLabel(label.id, { text: e.target.value })}
+          />
+          <button
+            type="button"
+            className="ml-1 text-[10px] text-zinc-500 hover:text-zinc-300"
+            onClick={() => removeLabel(label.id)}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+    </div>
   );
 }

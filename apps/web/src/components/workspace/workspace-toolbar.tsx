@@ -15,35 +15,37 @@ export function WorkspaceToolbar() {
     setPendingStickySize,
   } = useWorkspace();
 
+  const pickTool = (t: typeof tool) => {
+    setTool(t);
+    setPendingStickySize(null);
+  };
+
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/90 p-2 text-xs">
-      <span className="text-zinc-500">Workspace</span>
+      <span className="font-medium text-zinc-400">Workspace</span>
       <Button
         variant={tool === "select" ? "primary" : "secondary"}
-        onClick={() => {
-          setTool("select");
-          setPendingStickySize(null);
-        }}
+        onClick={() => pickTool("select")}
       >
         Select
       </Button>
       <Button
         variant={tool === "pen" ? "primary" : "secondary"}
-        onClick={() => {
-          setTool("pen");
-          setPendingStickySize(null);
-        }}
+        onClick={() => pickTool("pen")}
       >
         Pencil
       </Button>
       <Button
         variant={tool === "eraser" ? "primary" : "secondary"}
-        onClick={() => {
-          setTool("eraser");
-          setPendingStickySize(null);
-        }}
+        onClick={() => pickTool("eraser")}
       >
         Eraser
+      </Button>
+      <Button
+        variant={tool === "text" ? "primary" : "secondary"}
+        onClick={() => pickTool("text")}
+      >
+        Text
       </Button>
       <div className="flex gap-1">
         {DRAW_COLORS.map((c) => (
@@ -58,6 +60,7 @@ export function WorkspaceToolbar() {
         ))}
       </div>
       <span className="text-zinc-600">|</span>
+      <span className="text-zinc-500">Sticky:</span>
       {(["sm", "md", "lg"] as const).map((size) => (
         <Button
           key={size}
@@ -67,19 +70,14 @@ export function WorkspaceToolbar() {
             setTool("select");
           }}
         >
-          Place {size.toUpperCase()} note
+          {size.toUpperCase()}
         </Button>
       ))}
-      {pendingStickySize ? (
-        <span className="text-amber-400">
-          Click anywhere on the page to drop a {pendingStickySize} sticky
-        </span>
-      ) : null}
       <Button variant="danger" onClick={() => clearDrawings()}>
-        Clear drawings
+        Clear draw + text
       </Button>
       <span className="text-zinc-500">
-        Drawings &amp; notes save in this browser (localStorage)
+        Trade page only · saves in this browser
       </span>
     </div>
   );
