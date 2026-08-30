@@ -1,5 +1,9 @@
 import { createServer } from "node:http";
-import "dotenv/config";
+import { config } from "dotenv";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+config({ path: resolve(dirname(fileURLToPath(import.meta.url)), "../../../.env") });
 import { getRequestListener } from "@hono/node-server";
 import { WebSocket as NodeWebSocket } from "ws";
 
@@ -20,11 +24,11 @@ import {
   type WsEvent,
 } from "@gcc/shared";
 import { RiskGate } from "@gcc/risk";
+import { getHeliusRpcUrl } from "./env.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const API_KEY = process.env.API_KEY ?? "dev";
-const RPC_URL =
-  process.env.HELIUS_RPC_URL ?? "https://api.mainnet-beta.solana.com";
+const RPC_URL = getHeliusRpcUrl();
 const SYMBOL = "SOL";
 
 const phoenix = createGccPhoenixClient({
@@ -220,3 +224,4 @@ async function pollLoop() {
 void pollLoop();
 
 console.log(`GCC server listening on http://localhost:${PORT}`);
+console.log(`Helius RPC: ${RPC_URL.includes("api-key") ? "configured" : RPC_URL}`);
