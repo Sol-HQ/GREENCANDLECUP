@@ -64,13 +64,17 @@ export function formatPaperTradeReceipt(
   const feeUsd = trade.notionalUsd * (takerFeeBps / 10_000);
   const marginUsd = trade.notionalUsd / leverage;
   const action = trade.action.replace(/_/g, " ");
+  const sizeStr =
+    trade.sizeBase >= 1
+      ? trade.sizeBase.toFixed(2)
+      : trade.sizeBase.toFixed(4);
   const pnl =
     trade.pnlUsd != null
       ? ` · realized ${trade.pnlUsd >= 0 ? "+" : ""}$${trade.pnlUsd.toFixed(2)}`
       : "";
   return (
-    `${action} · ${trade.sizeBase.toFixed(0)} tokens @ $${trade.priceUsd.toFixed(4)}` +
-    ` · ~$${trade.notionalUsd.toFixed(0)} notional · ~$${marginUsd.toFixed(0)} margin @ ${leverage}x` +
-    ` · fee ~$${feeUsd.toFixed(2)}${pnl} · cash $${trade.balanceUsdc.toFixed(2)}`
+    `${action} · ${sizeStr} ${trade.symbol} @ $${trade.priceUsd.toFixed(4)}` +
+    ` · $${trade.notionalUsd.toFixed(2)} notional · $${marginUsd.toFixed(2)} margin @ ${leverage}x` +
+    ` · fee $${feeUsd.toFixed(2)}${pnl} · cash $${trade.balanceUsdc.toFixed(2)}`
   );
 }

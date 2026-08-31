@@ -204,6 +204,14 @@ export class PaperPortfolio {
     return this.computeSizeBase(priceUsd) > 0;
   }
 
+  setLeverage(leverage: number) {
+    this.config.leverage = leverage;
+  }
+
+  getLeverage(): number {
+    return this.config.leverage;
+  }
+
   openLong(params: {
     symbol: string;
     priceUsd: number;

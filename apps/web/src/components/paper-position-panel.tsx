@@ -1,6 +1,6 @@
 "use client";
 
-import { Card, Stat } from "@/components/ui";
+import { Card, Stat, Button } from "@/components/ui";
 import type { BotConfig, PaperPortfolioState } from "@gcc/shared";
 import { PAPER_MARGIN_FRACTION } from "@gcc/shared";
 
@@ -17,11 +17,15 @@ export function PaperPositionPanel({
   symbol,
   cfg,
   isRunning,
+  onClose,
+  closing,
 }: {
   paper: PaperPortfolioState | null;
   symbol: string;
   cfg?: BotConfig | null;
-  isRunning: boolean;
+  isRunning?: boolean;
+  onClose?: () => void;
+  closing?: boolean;
 }) {
   const leverage = paper?.leverage ?? cfg?.paperLeverage ?? 2;
   const marginPct = Math.round(PAPER_MARGIN_FRACTION * 100);
@@ -92,21 +96,29 @@ export function PaperPositionPanel({
           <div className="grid gap-1 font-mono text-xs text-zinc-400 md:grid-cols-2">
             <p>Entry: ${paper.entryPriceUsd?.toFixed(4) ?? "—"}</p>
             <p>Mark: {mark != null ? `$${mark.toFixed(4)}` : "—"}</p>
-            <p>Size: {paper.positionSizeBase.toFixed(0)} {symbol} tokens</p>
-            <p>Notional: ~{fmtUsd(paper.notionalUsd ?? 0, 0)}</p>
-            <p>Margin posted: ~{fmtUsd(paper.marginUsd ?? 0, 0)}</p>
+            <p>Size: {paper.positionSizeBase.toFixed(4)} {symbol}</p>
+            <p>Notional: ~{fmtUsd(paper.notionalUsd ?? 0, 2)}</p>
+            <p>Margin posted: ~{fmtUsd(paper.marginUsd ?? 0, 2)}</p>
             <p>Leverage: {leverage}x</p>
           </div>
           <p className="text-xs text-zinc-500">
-            P&L math: ({mark?.toFixed(4) ?? "?"} −{" "}
-            {paper.entryPriceUsd?.toFixed(4)}) × {paper.positionSizeBase.toFixed(0)}{" "}
-            tokens ={" "}
+            P&L:{" "}
             <strong className="text-zinc-300">
               {unrealized >= 0 ? "+" : ""}
               {fmtUsd(unrealized)}
             </strong>
-            . When JUP ticks down, this number moves down live (every ~5s).
+            {unrealizedPct != null ? ` (${fmtPct(unrealizedPct)} on margin)` : ""}
           </p>
+          {onClose ? (
+            <Button
+              variant="danger"
+              className="mt-2 w-full"
+              disabled={closing}
+              onClick={onClose}
+            >
+              {closing ? "Closing…" : `Close ${paper.positionSide.toUpperCase()} position`}
+            </Button>
+          ) : null}
         </div>
       ) : (
         <div className="space-y-2 rounded-lg border border-zinc-800 bg-zinc-900/50 p-3 text-sm text-zinc-400">

@@ -827,6 +827,36 @@ app.post("/api/orders", async (c) => {
     const price = Number(
       body.priceUsd ?? market.markPriceUsd ?? market.bestAsk ?? 0,
     );
+    const portfolio = bot.getPaperPortfolio(price);
+    await trading.buildOrder(body, {
+      priceUsd: price,
+      leverage: requested,
+      collateralUsd: portfolio.balanceUsdc,
+      currentPositionNotionalUsd: portfolio.notionalUsd ?? 0,
+    });
+
+    if (body.mode === "paper") {
+      const exec = bot.executeManualPaperOrder(body, price);
+      if (exec.error || !exec.trade) {
+        return c.json({ error: exec.error ?? "Paper fill failed" }, 400);
+      }
+      persistPaperState();
+      broadcast({ type: "paper_trade", data: exec.trade });
+      broadcast({
+        type: "paper_portfolio",
+        data: bot.getPaperPortfolio(price),
+      });
+      broadcast({ type: "metrics", data: bot.getMetrics() });
+      return c.json({
+        mode: "paper",
+        simulationOnly: false,
+        message: exec.receipt,
+        receipt: exec.receipt,
+        trade: exec.trade,
+        portfolio: bot.getPaperPortfolio(price),
+      });
+    }
+
     const result = await trading.buildOrder(body, {
       priceUsd: price,
       leverage: requested,
@@ -835,6 +865,37 @@ app.post("/api/orders", async (c) => {
   } catch (error) {
     return c.json(
       { error: error instanceof Error ? error.message : "Order failed" },
+      400,
+    );
+  }
+});
+
+app.post("/api/paper/close", async (c) => {
+  try {
+    const body = (await c.req.json()) as { symbol?: string };
+    const symbol = (body.symbol ?? bot.getConfig().symbol).toUpperCase();
+    const market = await phoenix.getMarketSnapshot(symbol);
+    const price = Number(market.markPriceUsd ?? market.bestAsk ?? 0);
+    const exec = bot.closePaperPosition(symbol, price);
+    if (exec.error || !exec.trade) {
+      return c.json({ error: exec.error ?? "Close failed" }, 400);
+    }
+    persistPaperState();
+    broadcast({ type: "paper_trade", data: exec.trade });
+    broadcast({
+      type: "paper_portfolio",
+      data: bot.getPaperPortfolio(price),
+    });
+    broadcast({ type: "metrics", data: bot.getMetrics() });
+    return c.json({
+      message: exec.receipt,
+      receipt: exec.receipt,
+      trade: exec.trade,
+      portfolio: bot.getPaperPortfolio(price),
+    });
+  } catch (error) {
+    return c.json(
+      { error: error instanceof Error ? error.message : "Close failed" },
       400,
     );
   }

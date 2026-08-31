@@ -8,10 +8,12 @@ import type {
   MarketSnapshot,
   OrderbookSnapshot,
   PaperTradeRecord,
+  PlaceOrderRequest,
 } from "@gcc/shared";
 import {
   DEFAULT_BOT_CONFIG,
   PaperPortfolio,
+  formatPaperTradeReceipt,
   type PaperPortfolioState,
   type PaperPositionSide,
 } from "@gcc/shared";
@@ -117,6 +119,177 @@ export class BotEngine {
 
   getPaperTrades(): PaperTradeRecord[] {
     return this.paper.getTrades();
+  }
+
+  /** Manual trade panel — same paper wallet as the bot. */
+  executeManualPaperOrder(
+    request: PlaceOrderRequest,
+    fillPriceUsd: number,
+  ): { trade: PaperTradeRecord | null; receipt: string; error?: string } {
+    const sym = request.symbol.toUpperCase();
+    const sizeBase = Number(request.sizeBase);
+    const leverage = request.leverage ?? this.paper.getLeverage();
+    const barTime = Math.floor(Date.now() / 1000);
+    const side = this.paper.getPositionSide();
+
+    if (fillPriceUsd <= 0 || sizeBase <= 0) {
+      return { trade: null, receipt: "", error: "Invalid price or size" };
+    }
+
+    this.paper.setLeverage(leverage);
+
+    const reduceOnly = request.reduceOnly === true;
+
+    if (reduceOnly) {
+      if (request.side === "sell" && side === "long") {
+        const trade = this.paper.closeLong({
+          symbol: sym,
+          priceUsd: fillPriceUsd,
+          reason: "Manual close long (reduce only)",
+          barTime,
+        });
+        if (!trade) return { trade: null, receipt: "", error: "No long to close" };
+        return this.finalizeManualTrade(trade, leverage);
+      }
+      if (request.side === "buy" && side === "short") {
+        const trade = this.paper.closeShort({
+          symbol: sym,
+          priceUsd: fillPriceUsd,
+          reason: "Manual close short (reduce only)",
+          barTime,
+        });
+        if (!trade) return { trade: null, receipt: "", error: "No short to close" };
+        return this.finalizeManualTrade(trade, leverage);
+      }
+      return {
+        trade: null,
+        receipt: "",
+        error: `Reduce-only ${request.side} does not match open ${side} position`,
+      };
+    }
+
+    if (side === "long") {
+      if (request.side === "sell") {
+        const trade = this.paper.closeLong({
+          symbol: sym,
+          priceUsd: fillPriceUsd,
+          reason: "Manual close long",
+          barTime,
+        });
+        if (!trade) return { trade: null, receipt: "", error: "Failed to close long" };
+        return this.finalizeManualTrade(trade, leverage);
+      }
+      return {
+        trade: null,
+        receipt: "",
+        error: "Already long — sell to close or enable reduce only",
+      };
+    }
+    if (side === "short") {
+      if (request.side === "buy") {
+        const trade = this.paper.closeShort({
+          symbol: sym,
+          priceUsd: fillPriceUsd,
+          reason: "Manual close short",
+          barTime,
+        });
+        if (!trade) return { trade: null, receipt: "", error: "Failed to close short" };
+        return this.finalizeManualTrade(trade, leverage);
+      }
+      return {
+        trade: null,
+        receipt: "",
+        error: "Already short — buy to close or enable reduce only",
+      };
+    }
+
+    if (request.side === "buy") {
+      const trade = this.paper.openLong({
+        symbol: sym,
+        priceUsd: fillPriceUsd,
+        reason: `Manual long · ${sizeBase.toFixed(4)} ${sym} @ ${leverage}x`,
+        barTime,
+        sizeBase,
+      });
+      if (!trade) {
+        return { trade: null, receipt: "", error: "Could not open long — check balance" };
+      }
+      return this.finalizeManualTrade(trade, leverage);
+    }
+
+    const trade = this.paper.openShort({
+      symbol: sym,
+      priceUsd: fillPriceUsd,
+      reason: `Manual short · ${sizeBase.toFixed(4)} ${sym} @ ${leverage}x`,
+      barTime,
+      sizeBase,
+    });
+    if (!trade) {
+      return { trade: null, receipt: "", error: "Could not open short — check balance" };
+    }
+    return this.finalizeManualTrade(trade, leverage);
+  }
+
+  closePaperPosition(symbol: string, fillPriceUsd: number): {
+    trade: PaperTradeRecord | null;
+    receipt: string;
+    error?: string;
+  } {
+    const sym = symbol.toUpperCase();
+    const side = this.paper.getPositionSide();
+    const barTime = Math.floor(Date.now() / 1000);
+    const leverage = this.paper.getLeverage();
+
+    if (side === "flat") {
+      return { trade: null, receipt: "", error: "No open position to close" };
+    }
+    if (fillPriceUsd <= 0) {
+      return { trade: null, receipt: "", error: "Invalid mark price" };
+    }
+
+    const trade =
+      side === "long"
+        ? this.paper.closeLong({
+            symbol: sym,
+            priceUsd: fillPriceUsd,
+            reason: "Manual close position",
+            barTime,
+          })
+        : this.paper.closeShort({
+            symbol: sym,
+            priceUsd: fillPriceUsd,
+            reason: "Manual close position",
+            barTime,
+          });
+
+    if (!trade) {
+      return { trade: null, receipt: "", error: "Close failed" };
+    }
+    return this.finalizeManualTrade(trade, leverage);
+  }
+
+  private finalizeManualTrade(
+    trade: PaperTradeRecord,
+    leverage: number,
+  ): { trade: PaperTradeRecord; receipt: string } {
+    const price = this.lastPrice ?? trade.priceUsd;
+    const state = this.paper.getState(price, this.config.paperMinBalanceUsdc);
+    this.metrics.volumeUsd += trade.notionalUsd;
+    this.metrics.tradeCount += 1;
+    if (trade.pnlUsd != null) {
+      this.metrics.realizedPnlUsd += trade.pnlUsd;
+    }
+    this.metrics.unrealizedPnlUsd = state.unrealizedPnlUsd;
+    this.metrics.updatedAt = new Date().toISOString();
+
+    const receipt = formatPaperTradeReceipt(
+      trade,
+      leverage,
+      this.config.paperTakerFeeBps,
+    );
+    this.onLog("info", `TRADE · ${receipt}`);
+    this.onPaperTrade?.(trade);
+    return { trade, receipt };
   }
 
   loadTradeHistory(trades: PaperTradeRecord[]) {
