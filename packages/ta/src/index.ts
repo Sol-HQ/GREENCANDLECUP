@@ -163,3 +163,11 @@ export function analyzeCandles(
 
   return { trend, macd, prevMacd, emaFast, emaSlow, signal, reason };
 }
+
+export {
+  analyzeWaveScalp,
+  DEFAULT_WAVE_SCALP_CONFIG,
+  type WaveScalpAction,
+  type WaveScalpAnalysis,
+  type WaveScalpConfig,
+} from "./wave-scalp.js";

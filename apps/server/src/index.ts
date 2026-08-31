@@ -13,7 +13,7 @@ import { WebSocket as NodeWebSocket } from "ws";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { WebSocketServer, WebSocket } from "ws";
-import { createGccPhoenixClient } from "@gcc/phoenix-client";
+import { createGccPhoenixClient, resolveBirdeyeMint, fetchMarketBriefing } from "@gcc/phoenix-client";
 import { TradingCore } from "@gcc/trading-core";
 import { BotEngine } from "@gcc/bot-engine";
 import { randomUUID } from "node:crypto";
@@ -22,23 +22,36 @@ import {
   BotStrategySchema,
   CandleTimeframeSchema,
   DEFAULT_RISK_LIMITS,
+  DEFAULT_SYMBOL,
   NetworkConfigSchema,
+  normalizeCandleTimeframe,
   PlaceOrderRequestSchema,
+  formatPriceUsd,
   RiskLimitsSchema,
   SolanaClusterSchema,
   type TradeAlert,
   type WsEvent,
   type SolanaCluster,
 } from "@gcc/shared";
-import { analyzeCandles } from "@gcc/ta";
+import { analyzeCandles, analyzeWaveScalp } from "@gcc/ta";
 import { RiskGate } from "@gcc/risk";
-import { getHeliusRpcUrl, maskRpcUrl } from "./env.js";
+import {
+  getPhoenixReadRpcUrl,
+  getPublicWalletRpcUrl,
+  getTxRpcUrl,
+  maskRpcUrl,
+  validateRpcRoutingAtStartup,
+} from "./env.js";
+
+validateRpcRoutingAtStartup();
 
 const PORT = Number(process.env.PORT ?? 8787);
 const API_KEY = process.env.API_KEY ?? "dev";
-const RPC_URL = getHeliusRpcUrl();
-const SYMBOL = "SOL";
-const SERVER_POLL_MS = Number(process.env.SERVER_POLL_MS ?? 1000);
+const PHOENIX_READ_RPC_URL = getPhoenixReadRpcUrl();
+const TX_RPC_URL = getTxRpcUrl();
+let watchSymbol = process.env.DEFAULT_SYMBOL ?? DEFAULT_SYMBOL;
+const SYMBOL = () => watchSymbol;
+const SERVER_POLL_MS = Number(process.env.SERVER_POLL_MS ?? 3000);
 
 let walletCluster: SolanaCluster =
   process.env.SOLANA_CLUSTER === "devnet" ? "devnet" : "mainnet-beta";
@@ -53,7 +66,7 @@ const networkSnapshot = () =>
   });
 
 const phoenix = createGccPhoenixClient({
-  rpcUrl: RPC_URL,
+  rpcUrl: PHOENIX_READ_RPC_URL,
   apiUrl: process.env.PHOENIX_API_URL,
 });
 
@@ -61,7 +74,8 @@ const riskGate = new RiskGate(DEFAULT_RISK_LIMITS);
 const trading = new TradingCore(
   phoenix,
   {
-    rpcUrl: RPC_URL,
+    readRpcUrl: PHOENIX_READ_RPC_URL,
+    txRpcUrl: TX_RPC_URL,
     keypairPath: process.env.BOT_KEYPAIR_PATH,
   },
   riskGate,
@@ -90,13 +104,15 @@ const pushLog = (level: "info" | "warn" | "error", message: string) => {
   broadcast({ type: "log", data: entry });
   if (
     level === "info" &&
-    (message.startsWith("Paper") || message.includes("order"))
+    (message.startsWith("TRADE") ||
+      message.startsWith("Paper") ||
+      message.includes("order"))
   ) {
     pushAlert({
       level: "signal",
       title: "Bot trade signal",
       message,
-      symbol: SYMBOL,
+      symbol: SYMBOL(),
     });
   }
 };
@@ -106,6 +122,27 @@ const bot = new BotEngine(
   pushLog,
   async (symbol, timeframe, limit = 120) =>
     phoenix.getCandles(symbol, timeframe, limit),
+  (trade) => {
+    broadcast({ type: "paper_trade", data: trade });
+    broadcast({
+      type: "paper_portfolio",
+      data: bot.getPaperPortfolio(),
+    });
+    broadcast({ type: "metrics", data: bot.getMetrics() });
+  },
+  async (symbol) => {
+    const markets = await phoenix.listMarkets();
+    const listing = markets.find((m) => m.symbol === symbol);
+    if (!listing) return null;
+    const detail = await phoenix.getMarketDetail(symbol);
+    return fetchMarketBriefing({
+      symbol,
+      name: listing.name,
+      coinGeckoId: listing.coinGeckoId,
+      maxLeverage: listing.maxLeverage,
+      markPriceUsd: detail.markPriceUsd,
+    });
+  },
 );
 
 const app = new Hono();
@@ -126,6 +163,150 @@ app.get("/api/health", (c) =>
     wallet: trading.getBotPublicKey(),
   }),
 );
+
+app.get("/api/logs", (c) => c.json({ logs: logs.slice(0, 50) }));
+
+app.get("/api/markets", async (c) => {
+  try {
+    return c.json(await phoenix.listMarkets());
+  } catch (error) {
+    return c.json(
+      {
+        error: error instanceof Error ? error.message : "Markets fetch failed",
+      },
+      503,
+    );
+  }
+});
+
+app.get("/api/birdeye/mint/:symbol", async (c) => {
+  try {
+    const symbol = c.req.param("symbol").trim().toUpperCase();
+    if (!symbol) return c.json({ error: "symbol required" }, 400);
+    const markets = await phoenix.listMarkets();
+    const listing = markets.find((m) => m.symbol === symbol);
+    if (!listing) {
+      return c.json(
+        {
+          symbol,
+          mint: null,
+          source: "none",
+          reason: "unknown_symbol",
+        } satisfies Awaited<ReturnType<typeof resolveBirdeyeMint>>,
+        404,
+      );
+    }
+    return c.json(
+      await resolveBirdeyeMint(symbol, listing.coinGeckoId),
+    );
+  } catch (error) {
+    return c.json(
+      {
+        error:
+          error instanceof Error ? error.message : "Birdeye mint resolve failed",
+      },
+      503,
+    );
+  }
+});
+
+app.get("/api/market/:symbol/briefing", async (c) => {
+  try {
+    const symbol = c.req.param("symbol").toUpperCase();
+    const markets = await phoenix.listMarkets();
+    const listing = markets.find((m) => m.symbol === symbol);
+    if (!listing) return c.json({ error: "unknown symbol" }, 404);
+    const detail = await phoenix.getMarketDetail(symbol);
+    const briefing = await fetchMarketBriefing({
+      symbol,
+      name: listing.name,
+      coinGeckoId: listing.coinGeckoId,
+      maxLeverage: listing.maxLeverage,
+      markPriceUsd: detail.markPriceUsd,
+    });
+    return c.json(briefing);
+  } catch (error) {
+    return c.json(
+      {
+        error: error instanceof Error ? error.message : "Briefing failed",
+      },
+      503,
+    );
+  }
+});
+
+app.get("/api/markets/movers", async (c) => {
+  try {
+    const markets = await phoenix.listMarkets();
+    const picks = ["JUP", "SOL", "WIF", "POPCAT", "BTC", "ETH"].filter((s) =>
+      markets.some((m) => m.symbol === s),
+    );
+    const rows = await Promise.all(
+      picks.map(async (symbol) => {
+        const candles = await phoenix.getCandles(symbol, "5m", 24);
+        if (candles.length < 5) return null;
+        const highs = candles.map((x) => x.high);
+        const lows = candles.map((x) => x.low);
+        const max = Math.max(...highs);
+        const min = Math.min(...lows);
+        const vol = candles.reduce((a, x) => a + x.volume, 0);
+        const rangePct = min > 0 ? ((max - min) / min) * 100 : 0;
+        return { symbol, rangePct, volume: vol, bars: candles.length };
+      }),
+    );
+    return c.json(
+      rows
+        .filter((r): r is NonNullable<typeof r> => r != null)
+        .sort((a, b) => b.rangePct - a.rangePct),
+    );
+  } catch (error) {
+    return c.json(
+      {
+        error: error instanceof Error ? error.message : "Movers scan failed",
+      },
+      503,
+    );
+  }
+});
+
+app.get("/api/paper/portfolio", (c) =>
+  c.json(bot.getPaperPortfolio()),
+);
+
+app.get("/api/paper/trades", (c) => c.json({ trades: bot.getPaperTrades() }));
+
+app.post("/api/paper/reset", (c) => {
+  bot.updateConfig({
+    paperBalanceUsdc: bot.getConfig().paperBalanceUsdc,
+  });
+  return c.json(bot.getPaperPortfolio());
+});
+
+app.get("/api/market/:symbol/detail", async (c) => {
+  try {
+    const symbol = c.req.param("symbol");
+    return c.json(await phoenix.getMarketDetail(symbol));
+  } catch (error) {
+    return c.json(
+      {
+        error: error instanceof Error ? error.message : "Market detail failed",
+      },
+      503,
+    );
+  }
+});
+
+app.get("/api/symbol", (c) => c.json({ symbol: watchSymbol }));
+
+app.patch("/api/symbol", async (c) => {
+  const body = (await c.req.json()) as { symbol?: string };
+  const next = body.symbol?.trim().toUpperCase();
+  if (!next) return c.json({ error: "symbol required" }, 400);
+  watchSymbol = next;
+  bot.updateConfig({ symbol: next });
+  lastMarkPrice = null;
+  return c.json({ symbol: watchSymbol });
+});
 
 app.get("/api/market/:symbol", async (c) => {
   try {
@@ -162,7 +343,17 @@ app.get("/api/alerts", (c) => c.json(alerts));
 app.get("/api/candles/:symbol", async (c) => {
   try {
     const symbol = c.req.param("symbol");
-    const timeframe = c.req.query("timeframe") ?? "15m";
+    const rawTf = c.req.query("timeframe") ?? "1m";
+    const timeframe = normalizeCandleTimeframe(rawTf);
+    if (rawTf !== timeframe) {
+      return c.json(
+        {
+          error: `Phoenix does not support "${rawTf}" candles. Use ${timeframe} instead (supported: 1m, 5m, 15m, 30m, 1h, 4h, 1d).`,
+          timeframe,
+        },
+        400,
+      );
+    }
     const limit = Number(c.req.query("limit") ?? "100");
     return c.json(await phoenix.getCandles(symbol, timeframe, limit));
   } catch (error) {
@@ -186,6 +377,17 @@ app.get("/api/ta/:symbol", async (c) => {
       return c.json({ trend: "flat", signal: null, reason: "Manual mode" });
     }
     const candles = await phoenix.getCandles(symbol, timeframe, 120);
+    if (strategy === "wave_scalp") {
+      const paper = bot.getPaperPortfolio();
+      return c.json(
+        analyzeWaveScalp(candles, paper.positionSide, paper.entryPriceUsd, {
+          takeProfitPct: bot.getConfig().takeProfitPct,
+          stopLossPct: bot.getConfig().stopLossPct,
+          swingLookback: 20,
+          nearExtremePct: 0.35,
+        }),
+      );
+    }
     return c.json(analyzeCandles(candles, strategy));
   } catch (error) {
     return c.json(
@@ -200,9 +402,10 @@ app.get("/api/risk", (c) => c.json(riskGate.getLimits()));
 app.get("/api/network", (c) =>
   c.json({
     ...networkSnapshot(),
-    walletRpcUrl: getHeliusRpcUrl(walletCluster),
-    walletRpcMasked: maskRpcUrl(getHeliusRpcUrl(walletCluster)),
-    botRpcMasked: maskRpcUrl(RPC_URL),
+    walletRpcUrl: getPublicWalletRpcUrl(walletCluster),
+    walletRpcMasked: getPublicWalletRpcUrl(walletCluster),
+    phoenixRpcMasked: maskRpcUrl(PHOENIX_READ_RPC_URL),
+    txRpcMasked: maskRpcUrl(TX_RPC_URL),
   }),
 );
 
@@ -216,14 +419,15 @@ app.patch("/api/network", async (c) => {
     type: "network",
     data: {
       ...networkSnapshot(),
-      walletRpcUrl: getHeliusRpcUrl(walletCluster),
+      walletRpcUrl: getPublicWalletRpcUrl(walletCluster),
     },
   });
   return c.json({
     ...networkSnapshot(),
-    walletRpcUrl: getHeliusRpcUrl(walletCluster),
-    walletRpcMasked: maskRpcUrl(getHeliusRpcUrl(walletCluster)),
-    botRpcMasked: maskRpcUrl(RPC_URL),
+    walletRpcUrl: getPublicWalletRpcUrl(walletCluster),
+    walletRpcMasked: getPublicWalletRpcUrl(walletCluster),
+    phoenixRpcMasked: maskRpcUrl(PHOENIX_READ_RPC_URL),
+    txRpcMasked: maskRpcUrl(TX_RPC_URL),
   });
 });
 
@@ -238,17 +442,22 @@ app.get("/api/bot", (c) =>
     config: bot.getConfig(),
     status: bot.getStatus(),
     analysis: bot.getLastAnalysis(),
+    briefing: bot.getBriefing(),
+    paper: bot.getPaperPortfolio(),
   }),
 );
 
 app.patch("/api/bot", async (c) => {
   const body = BotConfigSchema.partial().parse(await c.req.json());
+  if (body.candleTimeframe) {
+    body.candleTimeframe = normalizeCandleTimeframe(body.candleTimeframe);
+  }
   bot.updateConfig(body);
   return c.json({ config: bot.getConfig(), status: bot.getStatus() });
 });
 
 app.post("/api/bot/start", (c) => {
-  bot.start();
+  void bot.start();
   return c.json({ status: bot.getStatus() });
 });
 
@@ -265,11 +474,25 @@ app.post("/api/bot/stop", (c) => {
 app.post("/api/orders", async (c) => {
   try {
     const body = PlaceOrderRequestSchema.parse(await c.req.json());
+    const detail = await phoenix.getMarketDetail(body.symbol);
+    const maxLev = detail.listing.maxLeverage ?? 1;
+    const requested = body.leverage ?? 1;
+    if (requested > maxLev) {
+      return c.json(
+        {
+          error: `Leverage ${requested}x exceeds Phoenix max ${maxLev}x for ${body.symbol}`,
+        },
+        400,
+      );
+    }
     const market = await phoenix.getMarketSnapshot(body.symbol);
     const price = Number(
       body.priceUsd ?? market.markPriceUsd ?? market.bestAsk ?? 0,
     );
-    const result = await trading.buildOrder(body, { priceUsd: price });
+    const result = await trading.buildOrder(body, {
+      priceUsd: price,
+      leverage: requested,
+    });
     return c.json(result);
   } catch (error) {
     return c.json(
@@ -300,6 +523,27 @@ function broadcast(event: WsEvent) {
 
 wss.on("connection", (ws) => {
   clients.add(ws);
+  const snapshot: WsEvent[] = [
+    { type: "metrics", data: bot.getMetrics() },
+    {
+      type: "health",
+      data: {
+        phoenixConnected: true,
+        phoenixPollLatencyMs: null,
+        rpcLatencyMs: null,
+        shredStreamActive: false,
+        botStatus: bot.getStatus(),
+        lastError: null,
+      },
+    },
+    { type: "network", data: { ...networkSnapshot(), walletRpcUrl: getPublicWalletRpcUrl(walletCluster) } },
+  ];
+  for (const event of snapshot) {
+    ws.send(JSON.stringify(event));
+  }
+  for (const entry of logs.slice(0, 20)) {
+    ws.send(JSON.stringify({ type: "log", data: entry }));
+  }
   ws.on("close", () => clients.delete(ws));
 });
 
@@ -307,15 +551,30 @@ async function pollLoop() {
   await phoenix.ready();
   pushLog("info", "Phoenix client ready");
 
-  phoenix.subscribeOrderbook(SYMBOL, (book) => {
-    broadcast({ type: "orderbook", data: book });
-  });
-
   setInterval(async () => {
     const start = Date.now();
     try {
-      const market = await phoenix.getMarketSnapshot(SYMBOL);
-      bot.onMarketUpdate(market);
+      const uiSymbol = SYMBOL();
+      const botSymbol = bot.getConfig().symbol;
+
+      let market;
+      let orderbook;
+      if (uiSymbol === botSymbol) {
+        const feed = await phoenix.getLiveFeed(uiSymbol);
+        bot.onMarketUpdate(feed.market);
+        market = feed.market;
+        orderbook = feed.orderbook;
+      } else {
+        const [botFeed, uiFeed] = await Promise.all([
+          phoenix.getLiveFeed(botSymbol),
+          phoenix.getLiveFeed(uiSymbol),
+        ]);
+        bot.onMarketUpdate(botFeed.market);
+        market = uiFeed.market;
+        orderbook = uiFeed.orderbook;
+      }
+
+      broadcast({ type: "orderbook", data: orderbook });
       const mark = Number(market.markPriceUsd ?? 0);
       const now = Date.now();
       if (lastMarkPrice && mark && now - lastAlertAt > 60_000) {
@@ -323,9 +582,9 @@ async function pollLoop() {
         if (Math.abs(pct) >= 0.35) {
           pushAlert({
             level: "info",
-            title: `SOL ${pct > 0 ? "rally" : "dip"} ${Math.abs(pct).toFixed(2)}%`,
-            message: `$${lastMarkPrice.toFixed(2)} → $${mark.toFixed(2)} (${SERVER_POLL_MS}ms tick)`,
-            symbol: SYMBOL,
+            title: `${uiSymbol} ${pct > 0 ? "rally" : "dip"} ${Math.abs(pct).toFixed(2)}%`,
+            message: `${formatPriceUsd(lastMarkPrice)} → ${formatPriceUsd(mark)} (${SERVER_POLL_MS}ms tick)`,
+            symbol: uiSymbol,
           });
           lastAlertAt = now;
         }
@@ -338,6 +597,7 @@ async function pollLoop() {
         type: "health",
         data: {
           phoenixConnected: true,
+          phoenixPollLatencyMs: latency,
           rpcLatencyMs: latency,
           shredStreamActive: false,
           botStatus: bot.getStatus(),
@@ -349,6 +609,7 @@ async function pollLoop() {
         type: "health",
         data: {
           phoenixConnected: false,
+          phoenixPollLatencyMs: null,
           rpcLatencyMs: null,
           shredStreamActive: false,
           botStatus: bot.getStatus(),
@@ -363,4 +624,5 @@ async function pollLoop() {
 void pollLoop();
 
 console.log(`GCC server listening on http://localhost:${PORT}`);
-console.log(`Helius RPC: ${RPC_URL.includes("api-key") ? "configured" : RPC_URL}`);
+console.log(`Phoenix data: HTTP API + read RPC (${PHOENIX_READ_RPC_URL})`);
+console.log(`Tx RPC (send only): ${TX_RPC_URL.includes("api-key") ? "Helius configured" : TX_RPC_URL}`);

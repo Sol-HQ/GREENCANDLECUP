@@ -32,16 +32,27 @@ export const RiskLimitsSchema = z.object({
 });
 export type RiskLimits = z.infer<typeof RiskLimitsSchema>;
 
-export const CandleTimeframeSchema = z.enum([
-  "15s",
-  "30s",
+export const PHOENIX_CANDLE_TIMEFRAMES = [
   "1m",
   "5m",
   "15m",
+  "30m",
   "1h",
   "4h",
-]);
+  "1d",
+] as const;
+
+export const CandleTimeframeSchema = z.enum(PHOENIX_CANDLE_TIMEFRAMES);
 export type CandleTimeframe = z.infer<typeof CandleTimeframeSchema>;
+
+/** Phoenix rejects 15s/30s — map legacy picks to the nearest supported bar. */
+export function normalizeCandleTimeframe(
+  timeframe: string,
+): CandleTimeframe {
+  if (timeframe === "15s" || timeframe === "30s") return "1m";
+  const parsed = CandleTimeframeSchema.safeParse(timeframe);
+  return parsed.success ? parsed.data : "1m";
+}
 
 export const SolanaClusterSchema = z.enum(["mainnet-beta", "devnet"]);
 export type SolanaCluster = z.infer<typeof SolanaClusterSchema>;
@@ -56,6 +67,7 @@ export const NetworkConfigSchema = z.object({
 export type NetworkConfig = z.infer<typeof NetworkConfigSchema>;
 
 export const BotStrategySchema = z.enum([
+  "wave_scalp",
   "trend_macd",
   "pullback",
   "momentum",
@@ -68,9 +80,14 @@ export const BotConfigSchema = z.object({
   symbol: z.string().default("SOL"),
   mode: TradeModeSchema.default("paper"),
   status: BotStatusSchema.default("stopped"),
-  strategy: BotStrategySchema.default("trend_macd"),
+  strategy: BotStrategySchema.default("wave_scalp"),
   candleTimeframe: CandleTimeframeSchema.default("1m"),
-  pollIntervalMs: z.number().int().positive().default(1000),
+  pollIntervalMs: z.number().int().positive().default(5000),
+  paperBalanceUsdc: z.number().positive().default(100),
+  takeProfitPct: z.number().positive().max(50).default(7),
+  stopLossPct: z.number().positive().max(50).default(4),
+  paperLeverage: z.number().positive().max(20).default(2),
+  warmupScanCount: z.number().int().nonnegative().default(3),
 });
 export type BotConfig = z.infer<typeof BotConfigSchema>;
 
@@ -81,8 +98,75 @@ export const PlaceOrderRequestSchema = z.object({
   sizeBase: z.string(),
   priceUsd: z.string().optional(),
   mode: TradeModeSchema.default("paper"),
+  slippageBps: z.number().int().min(1).max(5000).optional(),
+  leverage: z.number().positive().max(100).optional(),
+  reduceOnly: z.boolean().optional(),
+  postOnly: z.boolean().optional(),
 });
 export type PlaceOrderRequest = z.infer<typeof PlaceOrderRequestSchema>;
+
+export const PaperTradeRecordSchema = z.object({
+  id: z.string(),
+  symbol: z.string(),
+  action: z.enum(["open_long", "close_long", "open_short", "close_short"]),
+  priceUsd: z.number(),
+  sizeBase: z.number(),
+  notionalUsd: z.number(),
+  pnlUsd: z.number().nullable(),
+  balanceUsdc: z.number(),
+  reason: z.string(),
+  at: z.string(),
+  barTime: z.number(),
+});
+export type PaperTradeRecord = z.infer<typeof PaperTradeRecordSchema>;
+
+export const PaperPortfolioStateSchema = z.object({
+  startingBalanceUsdc: z.number(),
+  balanceUsdc: z.number(),
+  positionSide: z.enum(["flat", "long", "short"]),
+  positionSizeBase: z.number(),
+  entryPriceUsd: z.number().nullable(),
+  leverage: z.number(),
+  unrealizedPnlUsd: z.number(),
+  tradeCount: z.number().int(),
+  updatedAt: z.string(),
+});
+export type PaperPortfolioState = z.infer<typeof PaperPortfolioStateSchema>;
+
+export const MarketBriefingSchema = z.object({
+  symbol: z.string(),
+  name: z.string(),
+  coinGeckoId: z.string().nullable(),
+  summary: z.string(),
+  spotPriceUsd: z.string().nullable(),
+  marketCapUsd: z.number().nullable(),
+  volume24hUsd: z.number().nullable(),
+  change24hPct: z.number().nullable(),
+  change7dPct: z.number().nullable(),
+  athUsd: z.number().nullable(),
+  atlUsd: z.number().nullable(),
+  genesisDate: z.string().nullable(),
+  phoenixMaxLeverage: z.number().nullable(),
+  fetchedAt: z.string(),
+});
+export type MarketBriefing = z.infer<typeof MarketBriefingSchema>;
+
+export const TradeSettingsSchema = z.object({
+  slippageBps: z.number().int().min(1).max(5000).default(50),
+  leverage: z.number().positive().max(100).default(1),
+  /** Per-symbol leverage preference (clamped to Phoenix max per market). */
+  leverageBySymbol: z.record(z.string(), z.number().positive().max(100)).default({}),
+  sizeUnit: z.enum(["base", "usd"]).default("base"),
+  reduceOnly: z.boolean().default(false),
+  postOnly: z.boolean().default(false),
+});
+export type TradeSettings = z.infer<typeof TradeSettingsSchema>;
+
+export const DEFAULT_TRADE_SETTINGS: TradeSettings = TradeSettingsSchema.parse(
+  {},
+);
+
+export const SLIPPAGE_PRESETS_BPS = [10, 50, 100, 300] as const;
 
 export const GccMetricsSchema = z.object({
   volumeUsd: z.number().nonnegative(),
@@ -95,6 +179,8 @@ export type GccMetrics = z.infer<typeof GccMetricsSchema>;
 
 export const SystemHealthSchema = z.object({
   phoenixConnected: z.boolean(),
+  /** Phoenix HTTP poll round-trip (not Solana RPC). */
+  phoenixPollLatencyMs: z.number().nullable(),
   rpcLatencyMs: z.number().nullable(),
   shredStreamActive: z.boolean(),
   botStatus: BotStatusSchema,
@@ -119,8 +205,55 @@ export const MarketSnapshotSchema = z.object({
   bestBid: z.string().nullable(),
   bestAsk: z.string().nullable(),
   updatedAt: z.string(),
+  /** Where the mark came from — Phoenix HTTP, orderbook mid, or backup feed. */
+  priceSource: z
+    .enum(["phoenix", "orderbook_mid", "coingecko", "shredstream"])
+    .optional(),
 });
 export type MarketSnapshot = z.infer<typeof MarketSnapshotSchema>;
+
+export const PhoenixMarketListingSchema = z.object({
+  symbol: z.string(),
+  assetId: z.number(),
+  marketStatus: z.string(),
+  name: z.string(),
+  logoUri: z.string().nullable(),
+  displayColor: z.string().nullable(),
+  coinGeckoId: z.string().nullable(),
+  takerFeeBps: z.number(),
+  makerFeeBps: z.number(),
+  maxLeverage: z.number().nullable(),
+  fundingIntervalSeconds: z.number().nullable(),
+  maxFundingRatePct: z.number().nullable(),
+  isolatedOnly: z.boolean(),
+});
+export type PhoenixMarketListing = z.infer<typeof PhoenixMarketListingSchema>;
+
+export const MarketDetailSchema = z.object({
+  listing: PhoenixMarketListingSchema,
+  markPriceUsd: z.string().nullable(),
+  spotPriceUsd: z.string().nullable(),
+  bestBid: z.string().nullable(),
+  bestAsk: z.string().nullable(),
+  spreadUsd: z.string().nullable(),
+  spreadBps: z.string().nullable(),
+  openInterest: z.number().nullable(),
+  openInterestUsd: z.number().nullable(),
+  fundingRatePct: z.string().nullable(),
+  totalMakerFees: z.number().nullable(),
+  totalTakerFees: z.number().nullable(),
+  statsUpdatedAt: z.string().nullable(),
+  updatedAt: z.string(),
+  priceSource: z
+    .enum(["phoenix", "orderbook_mid", "coingecko", "shredstream"])
+    .optional(),
+  spotPriceSource: z
+    .enum(["phoenix", "coingecko", "tradingview"])
+    .optional(),
+});
+export type MarketDetail = z.infer<typeof MarketDetailSchema>;
+
+export const DEFAULT_SYMBOL = "SOL";
 
 export const OrderbookLevelSchema = z.object({
   price: z.string(),
@@ -163,6 +296,14 @@ export const WsEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("health"), data: SystemHealthSchema }),
   z.object({ type: z.literal("positions"), data: z.array(PositionViewSchema) }),
   z.object({ type: z.literal("orders"), data: z.array(OpenOrderViewSchema) }),
+  z.object({
+    type: z.literal("paper_trade"),
+    data: PaperTradeRecordSchema,
+  }),
+  z.object({
+    type: z.literal("paper_portfolio"),
+    data: PaperPortfolioStateSchema,
+  }),
   z.object({ type: z.literal("log"), data: z.object({ level: z.string(), message: z.string(), at: z.string() }) }),
   z.object({ type: z.literal("alert"), data: TradeAlertSchema }),
   z.object({
@@ -178,8 +319,16 @@ export const DEFAULT_RISK_LIMITS: RiskLimits = RiskLimitsSchema.parse({});
 
 export const DEFAULT_BOT_CONFIG: BotConfig = BotConfigSchema.parse({});
 
+export { PaperPortfolio } from "./paper-portfolio.js";
+export type { PaperPortfolioConfig, PaperPositionSide, PaperTradeAction } from "./paper-portfolio.js";
 export {
   GLOSSARY,
   STRATEGY_HELP,
   TIMEFRAME_HELP,
+  PAGE_GUIDES,
+  type PageGuideKey,
 } from "./glossary.js";
+export * from "./prices.js";
+export * from "./birdeye-mints.js";
+export * from "./candle-chart.js";
+export * from "./rpc-routing.js";

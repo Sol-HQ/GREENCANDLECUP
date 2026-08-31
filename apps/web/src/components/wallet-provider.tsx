@@ -8,14 +8,14 @@ import { WalletModalProvider } from "@solana/wallet-adapter-react-ui";
 import { PhantomWalletAdapter } from "@solana/wallet-adapter-phantom";
 import { useMemo } from "react";
 import "@solana/wallet-adapter-react-ui/styles.css";
+import { sanitizeWalletRpcUrl } from "@gcc/shared";
 import { NetworkProvider, useNetwork } from "@/components/network-provider";
 
 function WalletInner({ children }: { children: React.ReactNode }) {
   const { network } = useNetwork();
-  const endpoint =
-    network?.walletRpcUrl ??
-    process.env.NEXT_PUBLIC_SOLANA_RPC_URL ??
-    "https://api.mainnet-beta.solana.com";
+  const cluster =
+    network?.walletCluster === "devnet" ? "devnet" : "mainnet-beta";
+  const endpoint = sanitizeWalletRpcUrl(network?.walletRpcUrl, cluster);
   const wallets = useMemo(() => [new PhantomWalletAdapter()], []);
 
   return (

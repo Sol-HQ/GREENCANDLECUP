@@ -3,6 +3,7 @@
 import { Shell } from "@/components/shell";
 import { Card, Stat } from "@/components/ui";
 import { GLOSSARY } from "@gcc/shared";
+import { PageGuide } from "@/components/page-guide";
 import { useGccSocket } from "@/hooks/use-gcc-socket";
 import { useNetwork } from "@/components/network-provider";
 
@@ -13,6 +14,7 @@ export default function SystemPage() {
   return (
     <Shell connected={connected}>
       <div className="space-y-4">
+        <PageGuide page="system" />
         <div className="grid gap-4 md:grid-cols-3">
           <Stat
             label="Phoenix"
@@ -20,8 +22,12 @@ export default function SystemPage() {
             tone={health?.phoenixConnected ? "good" : "bad"}
           />
           <Stat
-            label="RPC latency"
-            value={health?.rpcLatencyMs != null ? `${health.rpcLatencyMs} ms` : "—"}
+            label="Phoenix poll"
+            value={
+              health?.phoenixPollLatencyMs ?? health?.rpcLatencyMs != null
+                ? `${health.phoenixPollLatencyMs ?? health.rpcLatencyMs} ms`
+                : "—"
+            }
           />
           <Stat
             label="ShredStream"
@@ -34,8 +40,25 @@ export default function SystemPage() {
             <p>
               Wallet RPC:{" "}
               <span className="text-zinc-100">
-                {network?.walletCluster ?? "—"}
+                {network?.walletCluster ?? "—"} · public Solana
               </span>
+            </p>
+            <p>
+              Phoenix / reads:{" "}
+              <span className="text-zinc-100">
+                {network?.phoenixRpcMasked ?? "public RPC"} + HTTP API
+              </span>
+            </p>
+            <p>
+              Tx send (Helius):{" "}
+              <span className="text-zinc-100">
+                {network?.txRpcMasked ?? network?.botRpcMasked ?? "—"}
+              </span>
+            </p>
+            <p className="text-xs text-zinc-500">
+              Data path: Phoenix HTTP for orderbook/candles/mark. Public Solana
+              RPC for wallet reads and Rise SDK fallback only. Helius fires on
+              sendTransaction — not on dashboard idle.
             </p>
             <p>
               Trading:{" "}

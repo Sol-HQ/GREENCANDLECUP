@@ -1,6 +1,7 @@
 import type { PhoenixClientBundle } from "@gcc/phoenix-client";
 import { RiskGate, estimateNotionalUsd } from "@gcc/risk";
 import type { PlaceOrderRequest } from "@gcc/shared";
+import { assertReadRpcNotHelius } from "@gcc/shared";
 import {
   Connection,
   Keypair,
@@ -10,7 +11,10 @@ import {
 import { readFileSync } from "node:fs";
 
 export type TradingCoreConfig = {
-  rpcUrl: string;
+  /** Public RPC for simulation / account reads — not Helius. */
+  readRpcUrl: string;
+  /** Helius (or dedicated) RPC — used only when submitting transactions. */
+  txRpcUrl: string;
   keypairPath?: string;
 };
 
@@ -22,16 +26,16 @@ export type OrderBuildResult = {
 };
 
 export class TradingCore {
-  readonly connection: Connection;
   readonly risk: RiskGate;
+  private readConnection: Connection | null = null;
+  private txConnection: Connection | null = null;
   private keypair: Keypair | null = null;
 
   constructor(
     private phoenix: PhoenixClientBundle,
-    config: TradingCoreConfig,
+    private readonly config: TradingCoreConfig,
     risk?: RiskGate,
   ) {
-    this.connection = new Connection(config.rpcUrl, "confirmed");
     this.risk = risk ?? new RiskGate({
       maxPositionNotionalUsd: 500,
       maxOrderNotionalUsd: 100,
@@ -39,6 +43,8 @@ export class TradingCore {
       maxLeverage: 5,
       minCollateralBufferUsd: 20,
     });
+
+    assertReadRpcNotHelius(config.readRpcUrl, "TradingCore readRpcUrl");
 
     if (config.keypairPath) {
       try {
@@ -52,6 +58,27 @@ export class TradingCore {
 
   getBotPublicKey(): string | null {
     return this.keypair?.publicKey.toBase58() ?? null;
+  }
+
+  private getReadConnection(): Connection {
+    if (!this.readConnection) {
+      this.readConnection = new Connection(this.config.readRpcUrl, {
+        commitment: "confirmed",
+        disableRetryOnRateLimit: true,
+      });
+    }
+    return this.readConnection;
+  }
+
+  /** Lazy Helius connection — only for transaction submission (Phase 2). */
+  getTxConnection(): Connection {
+    if (!this.txConnection) {
+      this.txConnection = new Connection(this.config.txRpcUrl, {
+        commitment: "confirmed",
+        disableRetryOnRateLimit: true,
+      });
+    }
+    return this.txConnection;
   }
 
   async buildOrder(
@@ -80,10 +107,18 @@ export class TradingCore {
     }
 
     if (request.mode === "paper") {
+      const slip =
+        request.slippageBps != null
+          ? ` · slippage ${(request.slippageBps / 100).toFixed(2)}%`
+          : "";
+      const lev =
+        request.leverage != null && request.leverage > 1
+          ? ` · ${request.leverage}x`
+          : "";
       return {
         mode: "paper",
         simulationOnly: true,
-        message: `Paper ${request.type} ${request.side} ${request.sizeBase} ${request.symbol} @ ${request.priceUsd ?? "market"}`,
+        message: `Paper ${request.type} ${request.side} ${request.sizeBase} ${request.symbol} @ ${request.priceUsd ?? "market"}${lev}${slip}`,
       };
     }
 
@@ -132,7 +167,7 @@ export class TradingCore {
 
   async simulateSerializedTx(base64: string) {
     const tx = VersionedTransaction.deserialize(Buffer.from(base64, "base64"));
-    return this.connection.simulateTransaction(tx);
+    return this.getReadConnection().simulateTransaction(tx);
   }
 
   setKeypairFromSecret(secret: Uint8Array) {
