@@ -11,7 +11,7 @@ import type {
   TradeAlert,
   WsEvent,
 } from "@gcc/shared";
-import { WS_URL } from "@/lib/utils";
+import { WS_URL, API_URL } from "@/lib/utils";
 
 export function useGccSocket(watchSymbol?: string) {
   const [market, setMarket] = useState<MarketSnapshot | null>(null);
@@ -34,7 +34,21 @@ export function useGccSocket(watchSymbol?: string) {
   useEffect(() => {
     const ws = new WebSocket(WS_URL);
 
-    ws.onopen = () => setConnected(true);
+    ws.onopen = () => {
+      setConnected(true);
+      void refreshPortfolio();
+    };
+
+    const portfolioPoll = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) void refreshPortfolio();
+    }, 8000);
+
+    function refreshPortfolio() {
+      return fetch(`${API_URL}/api/paper/portfolio`)
+        .then((r) => r.json())
+        .then((data: PaperPortfolioState) => setPaperPortfolio(data))
+        .catch(() => {});
+    }
     ws.onclose = () => setConnected(false);
     ws.onmessage = (event) => {
       const payload = JSON.parse(event.data as string) as WsEvent;
@@ -73,7 +87,10 @@ export function useGccSocket(watchSymbol?: string) {
       }
     };
 
-    return () => ws.close();
+    return () => {
+      clearInterval(portfolioPoll);
+      ws.close();
+    };
   }, [watchSymbol]);
 
   return { market, orderbook, metrics, health, logs, alerts, paperTrades, paperPortfolio, connected };

@@ -14,7 +14,7 @@ import {
   type TradeSettings,
 } from "@gcc/shared";
 
-const STORAGE_KEY = "gcc-trade-settings";
+const STORAGE_KEY = "gcc-trade-settings-v2";
 
 type TradeSettingsContextValue = {
   settings: TradeSettings;

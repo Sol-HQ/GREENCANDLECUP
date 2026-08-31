@@ -7,17 +7,24 @@ import { useSymbol } from "@/components/symbol-provider";
 import { useTradeSettings } from "@/components/trade-settings-provider";
 import { useNetwork } from "@/components/network-provider";
 import { useGccSocket } from "@/hooks/use-gcc-socket";
+import Link from "next/link";
 import { PaperPositionPanel } from "@/components/paper-position-panel";
-import { api } from "@/lib/utils";
-import { formatPriceUsd, formatUsdNotional } from "@/lib/market-symbols";
+import { PaperWalletBar, SourceBadge } from "@/components/paper-wallet-bar";
+import { api, cn } from "@/lib/utils";
 import {
   clampLeverage,
   leverageForSymbol,
   leverageOptionsForMarket,
 } from "@/lib/leverage";
-import type { PaperPortfolioState, PaperTradeRecord, PlaceOrderRequest } from "@gcc/shared";
-import { SLIPPAGE_PRESETS_BPS } from "@gcc/shared";
-import { cn } from "@/lib/utils";
+import { formatPriceUsd, formatUsdNotional } from "@/lib/market-symbols";
+import {
+  SLIPPAGE_PRESETS_BPS,
+  filterTradesBySource,
+  formatPaperTradeReceipt,
+  type PaperPortfolioState,
+  type PaperTradeRecord,
+  type PlaceOrderRequest,
+} from "@gcc/shared";
 
 type OrderResult = {
   message: string;
@@ -36,7 +43,7 @@ export function TradePanel({
   const { publicKey } = useWallet();
   const { listing } = useSymbol();
   const { network } = useNetwork();
-  const { paperPortfolio } = useGccSocket();
+  const { paperPortfolio, paperTrades } = useGccSocket();
   const { settings, updateSettings } = useTradeSettings();
   const mode = network?.tradingMode ?? "paper";
   const [side, setSide] = useState<"buy" | "sell">("buy");
@@ -52,6 +59,11 @@ export function TradePanel({
   const paper = paperPortfolio;
   const posSide = paper?.positionSide ?? "flat";
   const inPosition = posSide !== "flat";
+  const posSymbol = paper?.positionSymbol?.toUpperCase() ?? null;
+  const pageSymbol = symbol.toUpperCase();
+  const symbolMismatch =
+    inPosition && posSymbol != null && posSymbol !== pageSymbol;
+  const canTradeThisMarket = !symbolMismatch;
 
   useEffect(() => {
     if (markPrice && type === "limit" && !price) setPrice(markPrice);
@@ -112,11 +124,12 @@ export function TradePanel({
 
   const actionLabel = useMemo(() => {
     if (mode !== "paper") return type === "market" ? "Place Order" : "Place Limit";
+    if (symbolMismatch) return `Position open on ${posSymbol}`;
     if (posSide === "long" && side === "sell") return "Close Long (paper)";
     if (posSide === "short" && side === "buy") return "Close Short (paper)";
     if (side === "buy") return "Open Long (paper)";
     return "Open Short (paper)";
-  }, [mode, posSide, side, type]);
+  }, [mode, posSide, side, type, symbolMismatch, posSymbol]);
 
   const submit = async () => {
     setStatus("Submitting…");
@@ -150,12 +163,18 @@ export function TradePanel({
   };
 
   const closePosition = async () => {
+    if (!posSymbol) {
+      setStatus(
+        "Cannot close — position market unknown. Open Positions in the sidebar or reset the paper wallet on Bot.",
+      );
+      return;
+    }
     setClosing(true);
     setStatus("Closing position…");
     try {
       const result = await api<OrderResult>("/api/paper/close", {
         method: "POST",
-        body: JSON.stringify({ symbol }),
+        body: JSON.stringify({ symbol: posSymbol }),
       });
       setStatus(result.message);
       if (result.receipt) setLastReceipt(result.receipt);
@@ -169,15 +188,38 @@ export function TradePanel({
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
       {mode === "paper" && paper ? (
-        <PaperPositionPanel
-          paper={paper}
-          symbol={symbol}
-          onClose={() => void closePosition()}
-          closing={closing}
-        />
+        <>
+          <PaperWalletBar paper={paper} />
+          <PaperPositionPanel
+            paper={paper}
+            viewSymbol={symbol}
+            onClose={
+              inPosition && posSymbol && paper.positionSource === "manual"
+                ? () => void closePosition()
+                : undefined
+            }
+            closing={closing}
+            compact
+          />
+        </>
       ) : null}
 
-      <Card className="flex min-h-0 flex-1 flex-col" title={`Phoenix perp · ${symbol}`}>
+      <Card className="flex min-h-0 flex-1 flex-col" title={`Manual trading · ${symbol}`}>
+        <p className="mb-2 text-xs text-zinc-500">
+          <SourceBadge source="manual" /> · simulated fills only ·{" "}
+          <Link href="/positions" className="text-emerald-400 hover:underline">
+            all positions →
+          </Link>
+        </p>
+        {symbolMismatch ? (
+          <p className="mb-2 rounded-lg border border-amber-500/40 bg-amber-950/30 px-3 py-2 text-xs text-amber-100">
+            You have an open {posSide} on <strong>{posSymbol}</strong>. Close it on{" "}
+            <a href="/positions" className="underline">
+              Positions
+            </a>{" "}
+            or switch the market picker to {posSymbol} before trading {pageSymbol}.
+          </p>
+        ) : null}
         <p className="mb-2 text-xs leading-relaxed text-zinc-500">
           One paper wallet shared with the bot — ${paper?.balanceUsdc.toFixed(2) ?? "100.00"}{" "}
           cash · {mode === "paper" ? "simulated fills" : "live"} · header toggle switches mode.
@@ -241,7 +283,14 @@ export function TradePanel({
             />
             {settings.sizeUnit === "usd" && mark > 0 ? (
               <p className="mt-1 text-[11px] text-zinc-500">
-                ≈ {Number(sizeBase).toFixed(4)} {symbol} tokens @ {formatPriceUsd(markPrice)}
+                ≈ {Number(sizeBase).toFixed(4)} {symbol} · notional{" "}
+                {formatUsdNotional(notionalUsd)} · margin {formatUsdNotional(marginUsd)}{" "}
+                @ {activeLeverage}x
+              </p>
+            ) : settings.sizeUnit === "base" && mark > 0 ? (
+              <p className="mt-1 text-[11px] text-amber-400/90">
+                {sizeInput} {symbol} = {formatUsdNotional(notionalUsd)} notional — switch to
+                USD if you meant dollars (e.g. $10).
               </p>
             ) : null}
           </div>
@@ -344,7 +393,12 @@ export function TradePanel({
             ) : null}
           </div>
 
-          <Button onClick={() => void submit()}>{actionLabel}</Button>
+          <Button
+            onClick={() => void submit()}
+            disabled={mode === "paper" && symbolMismatch}
+          >
+            {actionLabel}
+          </Button>
 
           {lastReceipt ? (
             <div className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 p-2 text-xs text-emerald-100">
@@ -354,6 +408,23 @@ export function TradePanel({
           ) : null}
           {status ? (
             <p className="break-words text-sm text-zinc-300">{status}</p>
+          ) : null}
+
+          {mode === "paper" && paperTrades.length > 0 ? (
+            <div className="rounded-lg border border-violet-500/20 bg-violet-950/10 p-2">
+              <p className="mb-1 text-xs font-medium text-violet-300">
+                Recent manual fills
+              </p>
+              <ul className="space-y-1 text-[11px] font-mono text-zinc-400">
+                {filterTradesBySource(paperTrades, "manual")
+                  .slice(0, 5)
+                  .map((t) => (
+                    <li key={t.id}>
+                      {formatPaperTradeReceipt(t, paper?.leverage ?? activeLeverage)}
+                    </li>
+                  ))}
+              </ul>
+            </div>
           ) : null}
         </div>
       </Card>

@@ -133,20 +133,29 @@ export const PaperTradeRecordSchema = z.object({
   reason: z.string(),
   at: z.string(),
   barTime: z.number(),
+  source: z.enum(["manual", "bot"]).optional(),
+  leverage: z.number().optional(),
 });
 export type PaperTradeRecord = z.infer<typeof PaperTradeRecordSchema>;
 
 export const PaperPortfolioStateSchema = z.object({
   startingBalanceUsdc: z.number(),
   balanceUsdc: z.number(),
+  tradingBalanceUsdc: z.number(),
+  fundingBalanceUsdc: z.number(),
+  tradingCapUsdc: z.number(),
+  totalBalanceUsdc: z.number(),
   equityUsdc: z.number(),
   minBalanceUsdc: z.number(),
   alive: z.boolean(),
   positionSide: z.enum(["flat", "long", "short"]),
+  positionSymbol: z.string().nullable(),
+  positionSource: z.enum(["manual", "bot"]).nullable(),
   positionSizeBase: z.number(),
   entryPriceUsd: z.number().nullable(),
   leverage: z.number(),
   unrealizedPnlUsd: z.number(),
+  realizedPnlUsd: z.number(),
   tradeCount: z.number().int(),
   updatedAt: z.string(),
   markPriceUsd: z.number().nullable(),
@@ -181,7 +190,7 @@ export const TradeSettingsSchema = z.object({
   leverage: z.number().positive().max(100).default(1),
   /** Per-symbol leverage preference (clamped to Phoenix max per market). */
   leverageBySymbol: z.record(z.string(), z.number().positive().max(100)).default({}),
-  sizeUnit: z.enum(["base", "usd"]).default("base"),
+  sizeUnit: z.enum(["base", "usd"]).default("usd"),
   reduceOnly: z.boolean().default(false),
   postOnly: z.boolean().default(false),
 });
@@ -347,7 +356,14 @@ export const DEFAULT_RISK_LIMITS: RiskLimits = RiskLimitsSchema.parse({});
 
 export const DEFAULT_BOT_CONFIG: BotConfig = BotConfigSchema.parse({});
 
-export { PaperPortfolio } from "./paper-portfolio.js";
+export { PaperPortfolio, inferPositionSymbolFromTrades, inferPositionSourceFromTrades, DEFAULT_TRADING_CAP_USDC } from "./paper-portfolio.js";
+export {
+  buildClosedRoundTrips,
+  filterTradesBySource,
+  inferTradeSource,
+  walletSummaryFromPortfolio,
+} from "./paper-ledger.js";
+export type { ClosedRoundTrip, PaperTradeSource } from "./paper-ledger.js";
 export type { PaperPortfolioConfig, PaperPortfolioState, PaperPositionSide, PaperTradeAction } from "./paper-portfolio.js";
 export {
   PAPER_MARGIN_FRACTION,

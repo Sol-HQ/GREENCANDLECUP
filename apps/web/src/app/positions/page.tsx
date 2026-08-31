@@ -1,12 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Shell } from "@/components/shell";
 import { Card } from "@/components/ui";
 import { PageGuide } from "@/components/page-guide";
-import { PaperPositionPanel } from "@/components/paper-position-panel";
-import { COMPETITION_WALLET, formatPaperTradeReceipt } from "@gcc/shared";
+import { PaperLedgerPanel } from "@/components/paper-ledger-panel";
+import { COMPETITION_WALLET } from "@gcc/shared";
 import type { PaperPortfolioState, PaperTradeRecord } from "@gcc/shared";
 import { useGccSocket } from "@/hooks/use-gcc-socket";
 import { useNetwork } from "@/components/network-provider";
@@ -35,16 +35,17 @@ export default function PositionsPage() {
   }, [refresh, paperPortfolio, paperTrades]);
 
   const displayPaper = paperPortfolio ?? paper;
-  const symbol =
-    displayPaper?.positionSide !== "flat"
-      ? trades.at(-1)?.symbol ?? "JUP"
-      : "JUP";
-  const allTrades =
-    paperTrades.length > 0
-      ? [...paperTrades, ...trades.filter((t) => !paperTrades.some((p) => p.id === t.id))]
-      : trades;
+  const allTrades = useMemo(() => {
+    if (paperTrades.length === 0) return trades;
+    const byId = new Map<string, PaperTradeRecord>();
+    for (const t of trades) byId.set(t.id, t);
+    for (const t of paperTrades) byId.set(t.id, t);
+    return [...byId.values()].sort(
+      (a, b) => new Date(a.at).getTime() - new Date(b.at).getTime(),
+    );
+  }, [trades, paperTrades]);
 
-  const closePosition = async () => {
+  const closePosition = async (symbol: string) => {
     setClosing(true);
     setStatus("");
     try {
@@ -65,42 +66,37 @@ export default function PositionsPage() {
     <Shell connected={connected}>
       <div className="space-y-4">
         <PageGuide page="positions" />
+
         {mode === "paper" ? (
           <>
-            <PaperPositionPanel
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-sm text-zinc-400">
+                All open and closed paper positions — manual and bot — one $100
+                wallet.
+              </p>
+              <div className="flex gap-2 text-sm">
+                <Link href="/" className="text-emerald-400 hover:underline">
+                  Manual trade →
+                </Link>
+                <Link href="/bot" className="text-cyan-400 hover:underline">
+                  Bot →
+                </Link>
+              </div>
+            </div>
+
+            <PaperLedgerPanel
               paper={displayPaper}
-              symbol={symbol}
-              onClose={() => void closePosition()}
+              trades={allTrades}
+              onClose={(sym) => void closePosition(sym)}
               closing={closing}
+              onRefresh={() => void refresh()}
             />
+
             {status ? (
-              <p className="text-sm text-emerald-300">{status}</p>
+              <p className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-3 py-2 font-mono text-xs text-emerald-300">
+                {status}
+              </p>
             ) : null}
-            <Card title="Recent paper fills">
-              {allTrades.length === 0 ? (
-                <p className="text-sm text-zinc-500">
-                  No fills yet. Trade on Overview or Bot — same $100 wallet.
-                </p>
-              ) : (
-                <ul className="space-y-2 text-xs font-mono text-zinc-300">
-                  {allTrades
-                    .slice()
-                    .reverse()
-                    .slice(0, 20)
-                    .map((t) => (
-                      <li
-                        key={t.id}
-                        className="rounded border border-zinc-800/80 bg-zinc-900/40 px-3 py-2"
-                      >
-                        {formatPaperTradeReceipt(
-                          t,
-                          displayPaper?.leverage ?? 2,
-                        )}
-                      </li>
-                    ))}
-                </ul>
-              )}
-            </Card>
           </>
         ) : (
           <Card title="Live positions">
@@ -113,12 +109,6 @@ export default function PositionsPage() {
             </p>
           </Card>
         )}
-        <Link
-          href="/trade"
-          className="inline-block text-sm text-emerald-400 hover:underline"
-        >
-          Go to Trade workspace →
-        </Link>
       </div>
     </Shell>
   );

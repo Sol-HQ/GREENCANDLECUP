@@ -29,6 +29,7 @@ import {
   formatPriceUsd,
   RiskLimitsSchema,
   SolanaClusterSchema,
+  inferPositionSymbolFromTrades,
   type TradeAlert,
   type WsEvent,
   type SolanaCluster,
@@ -266,10 +267,7 @@ const bot = new BotEngine(
     recordPriceTick(trade.symbol, trade.priceUsd, "trade");
     persistPaperState();
     broadcast({ type: "paper_trade", data: trade });
-    broadcast({
-      type: "paper_portfolio",
-      data: bot.getPaperPortfolio(),
-    });
+    void broadcastPaperPortfolio();
     broadcast({ type: "metrics", data: bot.getMetrics() });
   },
   async (symbol) => {
@@ -294,6 +292,85 @@ function configForArm(): Omit<BotConfig, "status"> {
 
 function getAllPaperTrades() {
   return mergeTradeHistory(tradeHistory, bot.getPaperTrades());
+}
+
+async function getPaperPositionMark(): Promise<number | null> {
+  const sym = bot.getPositionSymbol();
+  if (!sym) return null;
+  try {
+    const market = await phoenix.getMarketSnapshot(sym);
+    const mark = Number(market.markPriceUsd ?? 0);
+    return mark > 0 ? mark : null;
+  } catch {
+    return null;
+  }
+}
+
+async function getPaperPortfolioForClient() {
+  const mark = await getPaperPositionMark();
+  return bot.getPaperPortfolio(mark);
+}
+
+async function broadcastPaperPortfolio() {
+  broadcast({
+    type: "paper_portfolio",
+    data: await getPaperPortfolioForClient(),
+  });
+}
+
+/** Pause bot after manual fills so it does not immediately re-open the position. */
+function pauseBotAfterManualTrade(reason: string) {
+  if (bot.getStatus() === "running") {
+    bot.pause();
+    pushLog(
+      "info",
+      `Bot paused after manual trade (${reason}) — press Start on Bot page to resume automation`,
+    );
+  }
+}
+
+function sanitizeRestoredPaperSession(trades: typeof bootPaper.trades) {
+  const snap = bot.exportPaperSession().portfolio;
+  const bal = snap.balanceUsdc;
+  const insane =
+    !Number.isFinite(bal) ||
+    bal > 10_000 ||
+    bal < -1_000 ||
+    (snap.positionSide !== "flat" &&
+      snap.entryPriceUsd != null &&
+      snap.entryPriceUsd > 0 &&
+      snap.positionSizeBase > 0 &&
+      snap.entryPriceUsd * snap.positionSizeBase > 50_000);
+
+  if (insane) {
+    pushLog(
+      "warn",
+      `Corrupted paper wallet ($${bal.toFixed(2)}) — auto-reset to $100. Use Bot → Reset if this repeats.`,
+    );
+    bot.resetPaper(100);
+    bot.loadTradeHistory(trades);
+    savePaperStore({
+      trades: [],
+      historyTrades: trades,
+      portfolio: bot.exportPaperSession().portfolio,
+      savedAt: new Date().toISOString(),
+      arm: botArmState,
+      savedAlerts: alerts.slice(0, 50),
+    });
+    return;
+  }
+
+  if (snap.positionSide !== "flat" && !snap.positionSymbol) {
+    const inferred = inferPositionSymbolFromTrades(trades, snap.positionSide);
+    if (inferred) {
+      bot.restorePaperSession({
+        trades,
+        portfolio: { ...snap, positionSymbol: inferred },
+      });
+      pushLog("info", `Backfilled open position symbol: ${inferred}`);
+      persistPaperState();
+    }
+  }
 }
 
 function persistPaperState() {
@@ -333,6 +410,7 @@ bot.restorePaperSession({
 bot.loadTradeHistory(
   mergeTradeHistory(bootPaper.historyTrades ?? [], bootPaper.trades),
 );
+sanitizeRestoredPaperSession(bootPaper.trades);
 if (bootPaper.portfolio) {
   pushLog(
     "info",
@@ -467,9 +545,9 @@ app.get("/api/markets/movers", async (c) => {
   }
 });
 
-app.get("/api/paper/portfolio", (c) =>
-  c.json(bot.getPaperPortfolio()),
-);
+app.get("/api/paper/portfolio", async (c) => {
+  return c.json(await getPaperPortfolioForClient());
+});
 
 app.get("/api/paper/trades", (c) =>
   c.json({ trades: getAllPaperTrades() }),
@@ -489,19 +567,51 @@ app.get("/api/paper/replay", (c) => {
   );
 });
 
-app.post("/api/paper/reset", (c) => {
+app.post("/api/paper/transfer", async (c) => {
+  try {
+    const body = (await c.req.json()) as {
+      direction?: "deposit" | "withdraw";
+      amountUsd?: number;
+    };
+    const direction = body.direction;
+    const amount = Number(body.amountUsd);
+    if (direction !== "deposit" && direction !== "withdraw") {
+      return c.json({ error: "direction must be deposit or withdraw" }, 400);
+    }
+    const result = bot.transferFunds(direction, amount);
+    if (!result.ok) {
+      return c.json({ error: result.error }, 400);
+    }
+    persistPaperState();
+    await broadcastPaperPortfolio();
+    return c.json({
+      message: result.message,
+      moved: result.moved,
+      portfolio: await getPaperPortfolioForClient(),
+    });
+  } catch (error) {
+    return c.json(
+      { error: error instanceof Error ? error.message : "Transfer failed" },
+      400,
+    );
+  }
+});
+
+app.post("/api/paper/reset", async (c) => {
   clearPriceTape();
+  bot.stop();
   bot.resetPaper(bot.getConfig().paperBalanceUsdc);
   tradeHistory = [];
   bot.loadTradeHistory([]);
   clearPaperStore({ wipeHistory: true });
   botArmState = null;
   persistPaperState();
-  broadcast({
-    type: "paper_portfolio",
-    data: bot.getPaperPortfolio(),
-  });
-  return c.json(bot.getPaperPortfolio());
+  pushLog(
+    "info",
+    "Paper wallet reset to $100 — all open positions and trade history cleared",
+  );
+  await broadcastPaperPortfolio();
+  return c.json(await getPaperPortfolioForClient());
 });
 
 app.get("/api/market/:symbol/detail", async (c) => {
@@ -685,14 +795,14 @@ app.patch("/api/risk", async (c) => {
   return c.json(riskGate.getLimits());
 });
 
-app.get("/api/bot", (c) =>
+app.get("/api/bot", async (c) =>
   c.json({
     config: bot.getConfig(),
     status: bot.getStatus(),
     armed: botArmState?.armed === true,
     analysis: bot.getLastAnalysis(),
     briefing: bot.getBriefing(),
-    paper: bot.getPaperPortfolio(),
+    paper: await getPaperPortfolioForClient(),
   }),
 );
 
@@ -705,7 +815,7 @@ app.patch("/api/bot", async (c) => {
   return c.json({ config: bot.getConfig(), status: bot.getStatus() });
 });
 
-app.post("/api/bot/start", (c) => {
+app.post("/api/bot/start", async (c) => {
   const status = bot.getStatus();
   const stored = loadPaperStore();
   const hasOpenSession =
@@ -725,7 +835,7 @@ app.post("/api/bot/start", (c) => {
   return c.json({
     status: bot.getStatus(),
     armed: true,
-    paper: bot.getPaperPortfolio(),
+    paper: await getPaperPortfolioForClient(),
   });
 });
 
@@ -840,12 +950,10 @@ app.post("/api/orders", async (c) => {
       if (exec.error || !exec.trade) {
         return c.json({ error: exec.error ?? "Paper fill failed" }, 400);
       }
+      pauseBotAfterManualTrade(exec.trade.action.startsWith("close") ? "close" : "open");
       persistPaperState();
       broadcast({ type: "paper_trade", data: exec.trade });
-      broadcast({
-        type: "paper_portfolio",
-        data: bot.getPaperPortfolio(price),
-      });
+      await broadcastPaperPortfolio();
       broadcast({ type: "metrics", data: bot.getMetrics() });
       return c.json({
         mode: "paper",
@@ -873,19 +981,19 @@ app.post("/api/orders", async (c) => {
 app.post("/api/paper/close", async (c) => {
   try {
     const body = (await c.req.json()) as { symbol?: string };
-    const symbol = (body.symbol ?? bot.getConfig().symbol).toUpperCase();
-    const market = await phoenix.getMarketSnapshot(symbol);
+    const posSym = bot.getPositionSymbol();
+    const symbol = (body.symbol ?? posSym ?? bot.getConfig().symbol).toUpperCase();
+    const markSym = posSym ?? symbol;
+    const market = await phoenix.getMarketSnapshot(markSym);
     const price = Number(market.markPriceUsd ?? market.bestAsk ?? 0);
     const exec = bot.closePaperPosition(symbol, price);
     if (exec.error || !exec.trade) {
       return c.json({ error: exec.error ?? "Close failed" }, 400);
     }
+    pauseBotAfterManualTrade("close");
     persistPaperState();
     broadcast({ type: "paper_trade", data: exec.trade });
-    broadcast({
-      type: "paper_portfolio",
-      data: bot.getPaperPortfolio(price),
-    });
+    await broadcastPaperPortfolio();
     broadcast({ type: "metrics", data: bot.getMetrics() });
     return c.json({
       message: exec.receipt,
@@ -1061,13 +1169,7 @@ async function pollLoop() {
       const latency = Date.now() - start;
       broadcast({ type: "market", data: market });
       broadcast({ type: "metrics", data: bot.getMetrics() });
-      const paperStatus = bot.getStatus();
-      if (paperStatus === "running" || bot.getPaperPortfolio().positionSide !== "flat") {
-        broadcast({
-          type: "paper_portfolio",
-          data: bot.getPaperPortfolio(),
-        });
-      }
+      await broadcastPaperPortfolio();
       broadcast({
         type: "health",
         data: healthPayload(null, latency),

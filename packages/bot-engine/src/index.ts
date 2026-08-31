@@ -112,13 +112,57 @@ export class BotEngine {
 
   getPaperPortfolio(markPrice?: number | null): PaperPortfolioState {
     return this.paper.getState(
-      markPrice ?? this.lastPrice,
+      this.resolveMarkForPortfolio(markPrice),
       this.config.paperMinBalanceUsdc,
     );
   }
 
+  /**
+   * Mark price for wallet P&L — only when a position is open, and only for that
+   * market. Never fall back to the bot's watch symbol when flat (was showing JUP
+   * ~$0.21 on the SOL overview).
+   */
+  private resolveMarkForPortfolio(explicitMark?: number | null): number | null {
+    if (this.paper.getPositionSide() === "flat") {
+      return null;
+    }
+    if (explicitMark != null && explicitMark > 0) {
+      return explicitMark;
+    }
+    const posSym = this.paper.getPositionSymbol();
+    if (posSym && posSym === this.config.symbol && this.lastPrice != null) {
+      return this.lastPrice;
+    }
+    return null;
+  }
+
+  getPositionSymbol(): string | null {
+    return this.paper.getPositionSymbol();
+  }
+
+  getPositionSource(): "manual" | "bot" | null {
+    return this.paper.getPositionSource();
+  }
+
   getPaperTrades(): PaperTradeRecord[] {
     return this.paper.getTrades();
+  }
+
+  transferFunds(
+    direction: "deposit" | "withdraw",
+    amountUsd: number,
+  ): { ok: true; moved: number; message: string } | { ok: false; error: string } {
+    const result =
+      direction === "deposit"
+        ? this.paper.depositToTrading(amountUsd)
+        : this.paper.withdrawToFunding(amountUsd);
+    if (!result.ok) {
+      return { ok: false, error: result.error };
+    }
+    const label = direction === "deposit" ? "Funding → Trading" : "Trading → Funding";
+    const message = `${label}: $${result.moved.toFixed(2)}`;
+    this.onLog("info", message);
+    return { ok: true, moved: result.moved, message };
   }
 
   /** Manual trade panel — same paper wallet as the bot. */
@@ -131,9 +175,27 @@ export class BotEngine {
     const leverage = request.leverage ?? this.paper.getLeverage();
     const barTime = Math.floor(Date.now() / 1000);
     const side = this.paper.getPositionSide();
+    const posSym = this.paper.getPositionSymbol();
+    const posSource = this.paper.getPositionSource();
 
     if (fillPriceUsd <= 0 || sizeBase <= 0) {
       return { trade: null, receipt: "", error: "Invalid price or size" };
+    }
+
+    if (side !== "flat" && posSource === "bot") {
+      return {
+        trade: null,
+        receipt: "",
+        error: `Bot has open ${side} on ${posSym} — close on Positions or pause the bot first`,
+      };
+    }
+
+    if (side !== "flat" && posSym && posSym !== sym) {
+      return {
+        trade: null,
+        receipt: "",
+        error: `Already ${side} on ${posSym} — close that position first or switch to ${posSym}`,
+      };
     }
 
     this.paper.setLeverage(leverage);
@@ -204,12 +266,20 @@ export class BotEngine {
     }
 
     if (request.side === "buy") {
+      if (!this.paper.canOpenForSource("manual")) {
+        return {
+          trade: null,
+          receipt: "",
+          error: "Another position is open — close it on Positions first",
+        };
+      }
       const trade = this.paper.openLong({
         symbol: sym,
         priceUsd: fillPriceUsd,
         reason: `Manual long · ${sizeBase.toFixed(4)} ${sym} @ ${leverage}x`,
         barTime,
         sizeBase,
+        source: "manual",
       });
       if (!trade) {
         return { trade: null, receipt: "", error: "Could not open long — check balance" };
@@ -217,12 +287,20 @@ export class BotEngine {
       return this.finalizeManualTrade(trade, leverage);
     }
 
+    if (!this.paper.canOpenForSource("manual")) {
+      return {
+        trade: null,
+        receipt: "",
+        error: "Another position is open — close it on Positions first",
+      };
+    }
     const trade = this.paper.openShort({
       symbol: sym,
       priceUsd: fillPriceUsd,
       reason: `Manual short · ${sizeBase.toFixed(4)} ${sym} @ ${leverage}x`,
       barTime,
       sizeBase,
+      source: "manual",
     });
     if (!trade) {
       return { trade: null, receipt: "", error: "Could not open short — check balance" };
@@ -237,26 +315,35 @@ export class BotEngine {
   } {
     const sym = symbol.toUpperCase();
     const side = this.paper.getPositionSide();
+    const posSym = this.paper.getPositionSymbol();
     const barTime = Math.floor(Date.now() / 1000);
     const leverage = this.paper.getLeverage();
 
     if (side === "flat") {
       return { trade: null, receipt: "", error: "No open position to close" };
     }
+    if (posSym && sym !== posSym) {
+      return {
+        trade: null,
+        receipt: "",
+        error: `Open position is ${posSym}, not ${sym}. Switch market or use Positions page.`,
+      };
+    }
     if (fillPriceUsd <= 0) {
       return { trade: null, receipt: "", error: "Invalid mark price" };
     }
 
+    const closeSym = posSym ?? sym;
     const trade =
       side === "long"
         ? this.paper.closeLong({
-            symbol: sym,
+            symbol: closeSym,
             priceUsd: fillPriceUsd,
             reason: "Manual close position",
             barTime,
           })
         : this.paper.closeShort({
-            symbol: sym,
+            symbol: closeSym,
             priceUsd: fillPriceUsd,
             reason: "Manual close position",
             barTime,
@@ -301,7 +388,11 @@ export class BotEngine {
     portfolio: {
       startingBalanceUsdc: number;
       balanceUsdc: number;
+      fundingBalanceUsdc?: number;
+      tradingCapUsdc?: number;
       positionSide: "flat" | "long" | "short";
+      positionSymbol?: string | null;
+      positionSource?: "manual" | "bot" | null;
       positionSizeBase: number;
       entryPriceUsd: number | null;
       leverage: number;
@@ -325,7 +416,11 @@ export class BotEngine {
     portfolio: {
       startingBalanceUsdc: number;
       balanceUsdc: number;
+      fundingBalanceUsdc: number;
+      tradingCapUsdc: number;
       positionSide: PaperPositionSide;
+      positionSymbol: string | null;
+      positionSource: "manual" | "bot" | null;
       positionSizeBase: number;
       entryPriceUsd: number | null;
       leverage: number;
@@ -337,7 +432,11 @@ export class BotEngine {
       portfolio: {
         startingBalanceUsdc: snap.startingBalanceUsdc,
         balanceUsdc: snap.balanceUsdc,
+        fundingBalanceUsdc: snap.fundingBalanceUsdc,
+        tradingCapUsdc: snap.tradingCapUsdc,
         positionSide: snap.positionSide,
+        positionSymbol: snap.positionSymbol,
+        positionSource: snap.positionSource,
         positionSizeBase: snap.positionSizeBase,
         entryPriceUsd: snap.entryPriceUsd,
         leverage: snap.leverage,
@@ -629,6 +728,12 @@ export class BotEngine {
         }
         if (
           isOpen &&
+          !this.paper.canOpenForSource("bot")
+        ) {
+          return;
+        }
+        if (
+          isOpen &&
           !this.paper.canOpen(this.lastPrice, this.config.paperMinBalanceUsdc)
         ) {
           this.die("cannot afford another trade");
@@ -719,6 +824,7 @@ export class BotEngine {
           reason: wave.reason,
           barTime,
           sizeBase,
+          source: "bot",
         });
         break;
       case "close_long":
@@ -736,6 +842,7 @@ export class BotEngine {
           reason: wave.reason,
           barTime,
           sizeBase,
+          source: "bot",
         });
         break;
       case "close_short":

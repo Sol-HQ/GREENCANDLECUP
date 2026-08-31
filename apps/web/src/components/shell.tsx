@@ -16,7 +16,7 @@ import { Button } from "./ui";
 const links: { href: string; label: string; badge?: string }[] = [
   { href: "/", label: "Overview" },
   { href: "/trade", label: "Trade" },
-  { href: "/positions", label: "Positions", badge: "Soon" },
+  { href: "/positions", label: "Positions" },
   { href: "/orders", label: "Orders", badge: "Soon" },
   { href: "/bot", label: "Bot" },
   { href: "/system", label: "System" },

@@ -12,7 +12,11 @@ const STORE_FILE = resolve(DATA_DIR, "paper-trades.json");
 export type PaperPortfolioSnapshot = {
   startingBalanceUsdc: number;
   balanceUsdc: number;
+  fundingBalanceUsdc?: number;
+  tradingCapUsdc?: number;
   positionSide: PaperPositionSide;
+  positionSymbol?: string | null;
+  positionSource?: "manual" | "bot" | null;
   positionSizeBase: number;
   entryPriceUsd: number | null;
   leverage: number;

@@ -23,7 +23,9 @@ import {
   INTEL_PROFILE_HELP,
   TIMEFRAME_HELP,
   formatPaperTradeReceipt,
+  filterTradesBySource,
 } from "@gcc/shared";
+import { PaperWalletBar } from "@/components/paper-wallet-bar";
 import { LearnPanel } from "@/components/learn-panel";
 import { BotActivityPanel } from "@/components/bot-activity-panel";
 import { PaperPositionPanel } from "@/components/paper-position-panel";
@@ -109,6 +111,7 @@ export default function BotPage() {
     Array<{ level: string; message: string; at: string }>
   >([]);
   const [restAlerts, setRestAlerts] = useState<TradeAlert[]>([]);
+  const [closing, setClosing] = useState(false);
 
   const refresh = async () => {
     const [botRes, riskRes, metricsRes, logsRes, tradesRes, moversRes, alertsRes] =
@@ -180,13 +183,29 @@ export default function BotPage() {
   const analysis = bot?.analysis;
   const paper = paperPortfolio ?? bot?.paper ?? null;
   const briefing = bot?.briefing;
+
+  const closePosition = async () => {
+    const sym = paper?.positionSymbol;
+    if (!sym) return;
+    setClosing(true);
+    try {
+      await api("/api/paper/close", {
+        method: "POST",
+        body: JSON.stringify({ symbol: sym }),
+      });
+      await refresh();
+    } finally {
+      setClosing(false);
+    }
+  };
+
   const displayTrades =
     paperTrades.length > 0
-      ? mergeTradeHistory(
-          trades,
-          paperTrades,
+      ? filterTradesBySource(
+          mergeTradeHistory(trades, paperTrades),
+          "bot",
         )
-      : trades;
+      : filterTradesBySource(trades, "bot");
 
   function mergeTradeHistory(
     apiTrades: PaperTradeRecord[],
@@ -661,11 +680,21 @@ export default function BotPage() {
           ) : null}
         </Card>
 
+        <PaperWalletBar paper={paper} />
+
         <PaperPositionPanel
           paper={paper}
-          symbol={cfg?.symbol ?? engagedSymbol}
+          viewSymbol={cfg?.symbol ?? engagedSymbol}
           cfg={cfg}
           isRunning={isRunning}
+          onClose={
+            paper?.positionSide !== "flat" &&
+            paper?.positionSymbol &&
+            paper?.positionSource === "bot"
+              ? () => void closePosition()
+              : undefined
+          }
+          closing={closing}
         />
 
         <BotActivityPanel
@@ -680,7 +709,7 @@ export default function BotPage() {
           trades={displayTrades}
         />
 
-        <Card title="Paper trade history (receipts)">
+        <Card title="Bot fills only (manual trades on Positions)">
           {displayTrades.length === 0 ? (
             <p className="text-sm text-zinc-500">
               No paper trades yet. Start the bot on a moving symbol (JUP, WIF…).
