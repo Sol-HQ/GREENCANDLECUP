@@ -782,6 +782,33 @@ app.post("/api/bot/stop", (c) => {
   return c.json({ status: bot.getStatus(), armed: false });
 });
 
+/** Toggle overnight auto-resume without stopping an active run. */
+app.post("/api/bot/auto-resume", async (c) => {
+  const body = (await c.req.json()) as { enabled?: boolean };
+  if (typeof body.enabled !== "boolean") {
+    return c.json({ error: "enabled (boolean) required" }, 400);
+  }
+  if (body.enabled) {
+    setBotArmed(true);
+    pushLog(
+      "info",
+      "Auto-resume ON — server restarts will restore this session (position, trades, settings)",
+    );
+  } else {
+    setBotArmed(false);
+    pushLog(
+      "info",
+      "Auto-resume OFF — server restarts will leave bot idle until you press Start",
+    );
+  }
+  return c.json({
+    armed: botArmState?.armed === true,
+    status: bot.getStatus(),
+    paper: bot.getPaperPortfolio(),
+    config: bot.getConfig(),
+  });
+});
+
 app.post("/api/orders", async (c) => {
   try {
     const body = PlaceOrderRequestSchema.parse(await c.req.json());

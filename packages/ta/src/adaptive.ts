@@ -211,6 +211,53 @@ function pickMode(fused: FusedRegime, position: "flat" | "long" | "short"): Adap
   }
 }
 
+/** At range extremes, pick long breakout or short fade instead of waiting forever. */
+function tryExtremeRangeEntry(
+  candles: Candle[],
+  position: "flat" | "long" | "short",
+  priceInRangePct: number,
+  rangePct: number,
+): { action: WaveScalpAction; reason: string } | null {
+  if (position !== "flat" || rangePct < 0.25) return null;
+
+  const closes = candles.map((c) => c.close);
+  const recent = closes.slice(-4);
+  const older = closes.slice(-8, -4);
+  const recentAvg =
+    recent.reduce((a, b) => a + b, 0) / Math.max(recent.length, 1);
+  const olderAvg =
+    older.reduce((a, b) => a + b, 0) / Math.max(older.length, 1);
+  const impulse = (recentAvg - olderAvg) / (olderAvg || 1);
+
+  if (priceInRangePct >= 88) {
+    if (impulse > 0.00005) {
+      return {
+        action: "open_long",
+        reason: `Range top ${priceInRangePct.toFixed(0)}% · momentum up → breakout long`,
+      };
+    }
+    return {
+      action: "open_short",
+      reason: `Range top ${priceInRangePct.toFixed(0)}% · fading → perp short`,
+    };
+  }
+
+  if (priceInRangePct <= 12) {
+    if (impulse < -0.00005) {
+      return {
+        action: "open_short",
+        reason: `Range bottom ${priceInRangePct.toFixed(0)}% · momentum down → breakdown short`,
+      };
+    }
+    return {
+      action: "open_long",
+      reason: `Range bottom ${priceInRangePct.toFixed(0)}% · bounce → perp long`,
+    };
+  }
+
+  return null;
+}
+
 function waveConfigForAdaptive(
   cfg: typeof DEFAULT_ADAPTIVE,
   profile: IntelProfile,
@@ -329,21 +376,37 @@ export function analyzeAdaptive(
       unrealizedPnlPct: spike.unrealizedPnlPct,
     };
   } else {
-    const wave = analyzeWaveScalp(
+  const wave = analyzeWaveScalp(
+    candles,
+    position,
+    entryPriceUsd,
+    waveConfigForAdaptive(cfg, cfg.intelProfile),
+  );
+  let scalpAction = wave.action;
+  let scalpReason = wave.reason;
+  if (wave.action === "hold" && position === "flat") {
+    const span = wave.rangeHigh - wave.rangeLow || wave.markPrice * 0.001;
+    const rangePct = (span / wave.markPrice) * 100;
+    const extreme = tryExtremeRangeEntry(
       candles,
       position,
-      entryPriceUsd,
-      waveConfigForAdaptive(cfg, cfg.intelProfile),
+      wave.priceInRangePct,
+      rangePct,
     );
-    raw = {
-      ...base,
-      action: wave.action,
-      reason: `[Scalp] ${wave.reason}`,
-      rangeLow: wave.rangeLow,
-      rangeHigh: wave.rangeHigh,
-      priceInRangePct: wave.priceInRangePct,
-      unrealizedPnlPct: wave.unrealizedPnlPct,
-    };
+    if (extreme) {
+      scalpAction = extreme.action;
+      scalpReason = extreme.reason;
+    }
+  }
+  raw = {
+    ...base,
+    action: scalpAction,
+    reason: `[Scalp] ${scalpReason}`,
+    rangeLow: wave.rangeLow,
+    rangeHigh: wave.rangeHigh,
+    priceInRangePct: wave.priceInRangePct,
+    unrealizedPnlPct: wave.unrealizedPnlPct,
+  };
   }
 
   const isClose =

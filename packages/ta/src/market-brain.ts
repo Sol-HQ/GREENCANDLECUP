@@ -184,8 +184,11 @@ function setupScore(
   fused: FusedRegime,
   candles: Candle[],
 ): { score: number; detail: string } {
+  if (action === "close_long" || action === "close_short") {
+    return { score: 15, detail: "Managing open position — exit logic" };
+  }
   if (!action.startsWith("open_")) {
-    return { score: 15, detail: "Managing open position" };
+    return { score: 4, detail: "No entry trigger yet" };
   }
   const closes = candles.map((c) => c.close);
   const mark = closes.at(-1) ?? 0;

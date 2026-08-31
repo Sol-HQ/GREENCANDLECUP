@@ -64,6 +64,7 @@ const INTEL_PROFILES = (
 type BotResponse = {
   config: BotConfig;
   status: string;
+  armed?: boolean;
   analysis?: WaveAnalysis | null;
   briefing?: MarketBriefing | null;
   paper?: PaperPortfolioState | null;
@@ -149,6 +150,14 @@ export default function BotPage() {
     await refresh();
   };
 
+  const setAutoResume = async (enabled: boolean) => {
+    await api("/api/bot/auto-resume", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    });
+    await refresh();
+  };
+
   const pickSymbol = async (sym: string) => {
     await setSymbol(sym);
     await saveConfig({ symbol: sym });
@@ -162,6 +171,7 @@ export default function BotPage() {
 
   const cfg = bot?.config;
   const botStatus = bot?.status ?? "stopped";
+  const isArmed = bot?.armed === true;
   const isRunning = botStatus === "running";
   const isPaused = botStatus === "paused";
   const isDead = botStatus === "dead";
@@ -346,6 +356,42 @@ export default function BotPage() {
         ) : null}
 
         <Card title="Bot controls">
+          <div
+            className={`mb-4 rounded-lg border p-4 ${
+              isArmed
+                ? "border-emerald-500/40 bg-emerald-500/5"
+                : "border-zinc-800 bg-zinc-900/40"
+            }`}
+          >
+            <label className="flex cursor-pointer items-start gap-3">
+              <input
+                type="checkbox"
+                className="mt-1 size-4 rounded border-zinc-600 bg-zinc-900 accent-emerald-500"
+                checked={isArmed}
+                onChange={(e) => void setAutoResume(e.target.checked)}
+              />
+              <span className="text-sm">
+                <strong className="text-zinc-100">
+                  Overnight auto-resume
+                </strong>
+                <span className="mt-1 block text-xs text-zinc-500">
+                  When checked, server restarts (tsx watch, crash, reboot) restore
+                  your exact session — open position, trade history, and bot
+                  settings — and keep scanning. Uncheck if you want a clean stop
+                  after you hit Stop.
+                </span>
+                {isArmed ? (
+                  <span className="mt-2 inline-block rounded bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-300">
+                    ARMED — will resume intelligently if tripped
+                  </span>
+                ) : (
+                  <span className="mt-2 inline-block rounded bg-zinc-800 px-2 py-0.5 text-xs text-zinc-500">
+                    Not armed — restart leaves bot idle
+                  </span>
+                )}
+              </span>
+            </label>
+          </div>
           <p className="mb-3 text-xs text-zinc-500">
             <strong className="text-zinc-300">Perps, not spot.</strong> A long
             bets JUP price goes up — you don&apos;t own tokens forever. Entry
@@ -357,8 +403,8 @@ export default function BotPage() {
           </p>
           <p className="mb-3 text-xs text-zinc-500">
             <strong className="text-zinc-300">Overnight run</strong> = fresh $100
-            on JUP, wave scalp, survival rules (bust below $
-            {cfg?.paperMinBalanceUsdc ?? 5}). Keep this PC + API running.
+            on JUP, adaptive brain, survival rules (bust below $
+            {cfg?.paperMinBalanceUsdc ?? 5}). Enable auto-resume above, then arm.
           </p>
           <div className="mb-3 flex flex-wrap gap-2">
             <Button
