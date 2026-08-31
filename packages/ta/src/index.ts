@@ -171,3 +171,32 @@ export {
   type WaveScalpAnalysis,
   type WaveScalpConfig,
 } from "./wave-scalp.js";
+
+export {
+  analyzeAdaptive,
+  detectMarketRegime,
+  fuseRegimes,
+  assessConfidence,
+  entryThresholdFor,
+  type AdaptiveAnalysis,
+  type AdaptiveConfig,
+  type AdaptiveMode,
+  type BrainAssessment,
+  type ConfidenceFactor,
+  type FusedRegime,
+  type IntelProfile,
+  type MarketRegime,
+  type RegimeAnalysis,
+} from "./adaptive.js";
+
+export {
+  type TimeframeAlignment,
+  ENTRY_THRESHOLDS,
+} from "./market-brain.js";
+
+export {
+  analyzeTrendRide,
+  DEFAULT_TREND_RIDE_CONFIG,
+  type TrendRideAnalysis,
+  type TrendRideConfig,
+} from "./trend-ride.js";

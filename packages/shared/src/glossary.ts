@@ -190,11 +190,17 @@ export const STRATEGY_HELP: Record<
   string,
   { label: string; summary: string; when: string }
 > = {
+  adaptive: {
+    label: "Adaptive (auto)",
+    summary:
+      "Reads 1m + 5m charts every scan — picks trend-ride, wave-scalp, or spike mode. Confidence score gates entries.",
+    when: "Default. Switches modes as the chart changes. Tune conviction below.",
+  },
   wave_scalp: {
     label: "Wave scalp ($100 paper)",
     summary:
-      "Quick in/out on swing lows and highs. One position at a time — buy bounce, take profit ~7%, cover shorts the same way. No stacking.",
-    when: "Choppy or moving coins (JUP, SOL). Matches ride-the-wave scalping.",
+      "Phoenix perp swings — long near range lows, short near highs, one position at a time. Targets ~7% move; skips entries when range is too tight or fees would eat the edge.",
+    when: "Choppy or moving coins (JUP, SOL). Not spot — opens/closes perp positions with margin.",
   },
   trend_macd: {
     label: "Trend + MACD",
@@ -220,5 +226,26 @@ export const STRATEGY_HELP: Record<
     label: "Manual only",
     summary: "Bot watches and alerts but never auto-trades.",
     when: "You want signals without automated orders.",
+  },
+};
+
+export const INTEL_PROFILE_HELP: Record<
+  string,
+  { label: string; threshold: number; summary: string }
+> = {
+  conservative: {
+    label: "Conservative (68+)",
+    threshold: 68,
+    summary: "Fewer trades, higher conviction. Waits for 1m + 5m alignment.",
+  },
+  balanced: {
+    label: "Balanced (52+)",
+    threshold: 52,
+    summary: "Default. Trades when trend + setup are solid, skips mixed signals.",
+  },
+  aggressive: {
+    label: "Aggressive (38+)",
+    threshold: 38,
+    summary: "More active paper trading. Takes trend continuations and looser scalps.",
   },
 };

@@ -73,6 +73,9 @@ export class TradingCore {
   /** Lazy Helius connection — only for transaction submission (Phase 2). */
   getTxConnection(): Connection {
     if (!this.txConnection) {
+      console.warn(
+        "[GCC] Helius tx RPC connection opened — should only happen on live sendTransaction",
+      );
       this.txConnection = new Connection(this.config.txRpcUrl, {
         commitment: "confirmed",
         disableRetryOnRateLimit: true,

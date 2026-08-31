@@ -4,10 +4,12 @@ export function Card({
   className,
   children,
   title,
+  action,
 }: {
   className?: string;
   children: React.ReactNode;
   title?: string;
+  action?: React.ReactNode;
 }) {
   return (
     <section
@@ -16,10 +18,17 @@ export function Card({
         className,
       )}
     >
-      {title ? (
-        <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-zinc-400">
-          {title}
-        </h2>
+      {title || action ? (
+        <div className="mb-3 flex items-center justify-between gap-2">
+          {title ? (
+            <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-400">
+              {title}
+            </h2>
+          ) : (
+            <span />
+          )}
+          {action}
+        </div>
       ) : null}
       {children}
     </section>

@@ -53,15 +53,17 @@ export function getPublicWalletRpcUrl(cluster?: SolanaCluster): string {
 }
 
 /**
- * Rise SDK fallback + simulateTransaction — standard Solana JSON-RPC.
- * Override with PHOENIX_READ_RPC_URL if public endpoints rate-limit you.
- * Phoenix market data (orderbook, candles, mark) still comes from HTTP API.
+ * Dedicated read RPC — Rise SDK bootstrap + simulateTransaction.
+ * Priority: READ_RPC_URL → TRITON_RPC_URL → PHOENIX_READ_RPC_URL → public Solana.
+ * Must NOT be Helius (tx credits only).
  */
 export function getPhoenixReadRpcUrl(cluster?: SolanaCluster): string {
-  const override = process.env.PHOENIX_READ_RPC_URL?.trim();
-  if (override) {
-    assertReadRpcNotHelius(override, "PHOENIX_READ_RPC_URL");
-    return override;
+  for (const key of ["READ_RPC_URL", "TRITON_RPC_URL", "PHOENIX_READ_RPC_URL"] as const) {
+    const override = process.env[key]?.trim();
+    if (override) {
+      assertReadRpcNotHelius(override, key);
+      return override;
+    }
   }
   return getPublicWalletRpcUrl(cluster);
 }

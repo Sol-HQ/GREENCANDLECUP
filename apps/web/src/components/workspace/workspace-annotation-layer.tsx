@@ -1,41 +1,62 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import type { Stroke, TextLabel } from "./types";
 import { useWorkspace } from "./workspace-context";
 
+type LayerMode = "global" | "local";
+
 type Props = {
-  boundsRef: React.RefObject<HTMLElement | null>;
+  mode: LayerMode;
+  panRef?: React.RefObject<HTMLElement | null>;
+  strokes: Stroke[];
+  labels: TextLabel[];
 };
 
-export function WorkspaceAnnotationLayer({ boundsRef }: Props) {
+export function WorkspaceAnnotationLayer({
+  mode,
+  panRef,
+  strokes,
+  labels,
+}: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const {
     tool,
     color,
-    strokes,
-    labels,
+    penTarget,
     addStroke,
-    eraseAt,
-    addLabel,
     updateLabel,
     removeLabel,
+    focusLabelId,
+    clearFocusLabel,
   } = useWorkspace();
+
   const drawing = useRef<{
     id: string;
     points: Array<{ x: number; y: number }>;
   } | null>(null);
 
-  const isActive = tool === "pen" || tool === "eraser" || tool === "text";
+  const isPen = tool === "pen";
+  const isFixed = mode === "global";
+  const layerActive = penTarget?.layer === mode;
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    const bounds = boundsRef.current;
-    if (!canvas || !bounds) return;
+    if (!canvas) return;
 
     const resize = () => {
-      const w = bounds.clientWidth;
-      const h = bounds.clientHeight;
-      if (w === 0 || h === 0) return;
+      let w: number;
+      let h: number;
+      if (isFixed) {
+        w = window.innerWidth;
+        h = window.innerHeight;
+      } else {
+        const pan = panRef?.current;
+        if (!pan) return;
+        w = pan.clientWidth;
+        h = pan.clientHeight;
+        if (w === 0 || h === 0) return;
+      }
       canvas.width = w;
       canvas.height = h;
       const ctx = canvas.getContext("2d");
@@ -57,42 +78,42 @@ export function WorkspaceAnnotationLayer({ boundsRef }: Props) {
     };
 
     resize();
+    if (isFixed) {
+      window.addEventListener("resize", resize);
+      return () => window.removeEventListener("resize", resize);
+    }
+    const pan = panRef?.current;
+    if (!pan) return;
     const ro = new ResizeObserver(resize);
-    ro.observe(bounds);
+    ro.observe(pan);
     return () => ro.disconnect();
-  }, [strokes, boundsRef]);
+  }, [strokes, panRef, isFixed]);
 
-  const localPoint = (e: React.PointerEvent) => {
-    const bounds = boundsRef.current;
-    if (!bounds) return { x: 0, y: 0 };
-    const rect = bounds.getBoundingClientRect();
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  const pointFromEvent = (e: React.PointerEvent) => {
+    if (isFixed) {
+      return { x: e.clientX, y: e.clientY };
+    }
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+    };
   };
 
   const onPointerDown = (e: React.PointerEvent) => {
-    if (!isActive) return;
+    if (!isPen || !layerActive) return;
     e.stopPropagation();
-    const p = localPoint(e);
-    if (tool === "text") {
-      addLabel({ x: p.x, y: p.y, text: "Label", color });
-      return;
-    }
-    if (tool === "eraser") {
-      eraseAt(p.x, p.y, 24);
-      return;
-    }
+    const p = pointFromEvent(e);
     drawing.current = { id: crypto.randomUUID(), points: [p] };
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
-    if (!isActive) return;
-    const p = localPoint(e);
-    if (tool === "eraser" && e.buttons === 1) {
-      eraseAt(p.x, p.y, 24);
-      return;
-    }
-    if (!drawing.current || tool !== "pen") return;
+    if (!isPen || !layerActive) return;
+    const p = pointFromEvent(e);
+    if (!drawing.current) return;
     drawing.current.points.push(p);
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
@@ -110,28 +131,31 @@ export function WorkspaceAnnotationLayer({ boundsRef }: Props) {
   };
 
   const onPointerUp = () => {
-    if (!drawing.current || tool !== "pen") return;
+    if (!drawing.current || !isPen || !layerActive) return;
     addStroke({
       id: drawing.current.id,
       points: drawing.current.points,
       color,
       width: 3,
+      scope: mode,
     });
     drawing.current = null;
   };
 
+  const showCanvas = isPen && layerActive;
+
   return (
-    <div className="pointer-events-none absolute inset-0 z-20">
-      {isActive ? (
-        <div className="pointer-events-none absolute left-1/2 top-2 z-30 -translate-x-1/2 rounded-lg bg-emerald-500/20 px-3 py-1 text-xs text-emerald-200">
-          {tool === "pen" && "Drawing — press Esc or Done to exit"}
-          {tool === "eraser" && "Eraser — drag over marks or stickies"}
-          {tool === "text" && "Click to place text"}
-        </div>
-      ) : null}
+    <div
+      className={
+        isFixed
+          ? "pointer-events-none fixed inset-0 z-[45]"
+          : "pointer-events-none absolute inset-0 z-20"
+      }
+    >
       <canvas
         ref={canvasRef}
-        className={`absolute inset-0 ${isActive ? "pointer-events-auto cursor-crosshair" : ""}`}
+        className={`absolute inset-0 ${showCanvas ? "pointer-events-auto cursor-crosshair" : "pointer-events-none"}`}
+        style={isFixed ? { position: "fixed" } : undefined}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -141,7 +165,11 @@ export function WorkspaceAnnotationLayer({ boundsRef }: Props) {
         <TextLabelChip
           key={label.id}
           label={label}
+          fixed={isFixed}
+          autoFocus={label.id === focusLabelId}
+          onFocused={clearFocusLabel}
           onChange={(text) => updateLabel(label.id, { text })}
+          onMove={(x, y) => updateLabel(label.id, { x, y })}
           onRemove={() => removeLabel(label.id)}
         />
       ))}
@@ -151,28 +179,100 @@ export function WorkspaceAnnotationLayer({ boundsRef }: Props) {
 
 function TextLabelChip({
   label,
+  fixed,
+  autoFocus,
+  onFocused,
   onChange,
+  onMove,
   onRemove,
 }: {
-  label: { id: string; x: number; y: number; text: string; color: string };
+  label: TextLabel;
+  fixed: boolean;
+  autoFocus: boolean;
+  onFocused: () => void;
   onChange: (text: string) => void;
+  onMove: (x: number, y: number) => void;
   onRemove: () => void;
 }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const drag = useRef<{
+    startX: number;
+    startY: number;
+    labelX: number;
+    labelY: number;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!autoFocus || !inputRef.current) return;
+    inputRef.current.focus();
+    inputRef.current.select();
+    onFocused();
+  }, [autoFocus, onFocused]);
+
+  const onDragPointerDown = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    drag.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      labelX: label.x,
+      labelY: label.y,
+    };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  };
+
+  const onDragPointerMove = (e: React.PointerEvent) => {
+    if (!drag.current) return;
+    const dx = e.clientX - drag.current.startX;
+    const dy = e.clientY - drag.current.startY;
+    onMove(drag.current.labelX + dx, drag.current.labelY + dy);
+  };
+
+  const onDragPointerUp = (e: React.PointerEvent) => {
+    if (!drag.current) return;
+    drag.current = null;
+    try {
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch {
+      // ignore
+    }
+  };
+
   return (
     <div
-      className="pointer-events-auto absolute z-30 flex items-center gap-1"
-      style={{ left: label.x, top: label.y }}
+      data-text-label
+      className="pointer-events-auto absolute z-50 flex max-w-[min(320px,calc(100vw-2rem))] items-start gap-0.5"
+      style={
+        fixed
+          ? { position: "fixed", left: label.x, top: label.y }
+          : { left: label.x, top: label.y }
+      }
     >
+      <button
+        type="button"
+        aria-label="Drag text label"
+        title="Drag to move"
+        className="mt-0.5 shrink-0 cursor-grab rounded bg-black/70 px-1 py-1 text-[10px] leading-none text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 active:cursor-grabbing"
+        onPointerDown={onDragPointerDown}
+        onPointerMove={onDragPointerMove}
+        onPointerUp={onDragPointerUp}
+        onPointerCancel={onDragPointerUp}
+      >
+        ⠿
+      </button>
       <input
-        className="rounded border border-zinc-700/80 bg-black/70 px-2 py-0.5 text-sm font-medium outline-none"
+        ref={inputRef}
+        className="min-w-[120px] max-w-full rounded border border-zinc-700/80 bg-black/80 px-2 py-0.5 text-sm font-medium outline-none focus:border-sky-500/60"
         style={{ color: label.color }}
         value={label.text}
+        placeholder="Type here…"
         onChange={(e) => onChange(e.target.value)}
         onPointerDown={(e) => e.stopPropagation()}
       />
       <button
         type="button"
-        className="rounded bg-black/60 px-1.5 py-0.5 text-sm text-zinc-300 hover:bg-rose-900 hover:text-white"
+        aria-label="Remove text label"
+        className="mt-0.5 shrink-0 rounded bg-black/70 px-1.5 py-0.5 text-sm text-zinc-300 hover:bg-rose-900 hover:text-white"
         onPointerDown={(e) => {
           e.stopPropagation();
           e.preventDefault();

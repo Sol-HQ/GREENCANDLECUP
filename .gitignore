@@ -4,7 +4,13 @@ dist
 .turbo
 .env
 .env.local
+.gcc-vault.local
+.gcc-vault.*
+.gcc-working.local.md
+.gcc-working.*
+**/keypair.json
 *.log
 .DS_Store
 keypair.json
 *.pem
+data/paper-trades.json

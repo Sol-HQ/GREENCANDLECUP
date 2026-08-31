@@ -5,18 +5,22 @@ import { Card } from "@/components/ui";
 import { GLOSSARY } from "@gcc/shared";
 
 const SECTIONS = [
+  GLOSSARY.whatIsGcc,
+  GLOSSARY.perpsVsSpot,
+  GLOSSARY.howToTradeToday,
+  GLOSSARY.paperVsLive,
+  GLOSSARY.mainnetVsDevnet,
+  GLOSSARY.competitionWallet,
   GLOSSARY.candle,
   GLOSSARY.ema,
   GLOSSARY.ema9Pullback,
   GLOSSARY.macd,
   GLOSSARY.trendMacd,
-  GLOSSARY.paperVsLive,
-  GLOSSARY.mainnetVsDevnet,
   GLOSSARY.shredStream,
 ] as const;
 
 export function LearnPanel() {
-  const [open, setOpen] = useState<string | null>(GLOSSARY.ema.title);
+  const [open, setOpen] = useState<string | null>(GLOSSARY.whatIsGcc.title);
 
   return (
     <Card title="Learn — trading terms in plain English">

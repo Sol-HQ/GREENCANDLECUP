@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { WalletProviders } from "@/components/wallet-provider";
+import { AppProviders } from "@/components/app-providers";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -15,7 +16,9 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="antialiased">
-        <WalletProviders>{children}</WalletProviders>
+        <WalletProviders>
+          <AppProviders>{children}</AppProviders>
+        </WalletProviders>
       </body>
     </html>
   );

@@ -20,6 +20,7 @@ export const BotStatusSchema = z.enum([
   "running",
   "paused",
   "error",
+  "dead",
 ]);
 export type BotStatus = z.infer<typeof BotStatusSchema>;
 
@@ -63,10 +64,14 @@ export const NetworkConfigSchema = z.object({
   phoenixNetwork: z.literal("mainnet").default("mainnet"),
   shredStreamConfigured: z.boolean().default(false),
   gccUsesMainnet: z.literal(true).default(true),
+  phoenixApiHost: z.string().optional(),
+  readRpcClass: z.enum(["public", "dedicated", "helius"]).optional(),
+  vpsPublicIp: z.string().nullable().optional(),
 });
 export type NetworkConfig = z.infer<typeof NetworkConfigSchema>;
 
 export const BotStrategySchema = z.enum([
+  "adaptive",
   "wave_scalp",
   "trend_macd",
   "pullback",
@@ -76,17 +81,28 @@ export const BotStrategySchema = z.enum([
 ]);
 export type BotStrategy = z.infer<typeof BotStrategySchema>;
 
+export const BotIntelProfileSchema = z.enum([
+  "conservative",
+  "balanced",
+  "aggressive",
+]);
+export type BotIntelProfile = z.infer<typeof BotIntelProfileSchema>;
+
 export const BotConfigSchema = z.object({
-  symbol: z.string().default("SOL"),
+  symbol: z.string().default("JUP"),
   mode: TradeModeSchema.default("paper"),
   status: BotStatusSchema.default("stopped"),
-  strategy: BotStrategySchema.default("wave_scalp"),
+  strategy: BotStrategySchema.default("adaptive"),
+  /** How much conviction (0–100) the bot needs before opening — adaptive only. */
+  intelProfile: BotIntelProfileSchema.default("balanced"),
   candleTimeframe: CandleTimeframeSchema.default("1m"),
   pollIntervalMs: z.number().int().positive().default(5000),
   paperBalanceUsdc: z.number().positive().default(100),
+  paperMinBalanceUsdc: z.number().nonnegative().default(5),
   takeProfitPct: z.number().positive().max(50).default(7),
   stopLossPct: z.number().positive().max(50).default(4),
   paperLeverage: z.number().positive().max(20).default(2),
+  paperTakerFeeBps: z.number().int().nonnegative().default(5),
   warmupScanCount: z.number().int().nonnegative().default(3),
 });
 export type BotConfig = z.infer<typeof BotConfigSchema>;
@@ -123,6 +139,9 @@ export type PaperTradeRecord = z.infer<typeof PaperTradeRecordSchema>;
 export const PaperPortfolioStateSchema = z.object({
   startingBalanceUsdc: z.number(),
   balanceUsdc: z.number(),
+  equityUsdc: z.number(),
+  minBalanceUsdc: z.number(),
+  alive: z.boolean(),
   positionSide: z.enum(["flat", "long", "short"]),
   positionSizeBase: z.number(),
   entryPriceUsd: z.number().nullable(),
@@ -130,8 +149,14 @@ export const PaperPortfolioStateSchema = z.object({
   unrealizedPnlUsd: z.number(),
   tradeCount: z.number().int(),
   updatedAt: z.string(),
+  markPriceUsd: z.number().nullable(),
+  marginUsd: z.number().nullable(),
+  notionalUsd: z.number().nullable(),
+  unrealizedPnlPctOnMargin: z.number().nullable(),
+  nextTradeMarginUsd: z.number(),
+  nextTradeNotionalUsd: z.number(),
+  nextTradeSizeBase: z.number().nullable(),
 });
-export type PaperPortfolioState = z.infer<typeof PaperPortfolioStateSchema>;
 
 export const MarketBriefingSchema = z.object({
   symbol: z.string(),
@@ -182,7 +207,10 @@ export const SystemHealthSchema = z.object({
   /** Phoenix HTTP poll round-trip (not Solana RPC). */
   phoenixPollLatencyMs: z.number().nullable(),
   rpcLatencyMs: z.number().nullable(),
+  readRpcLatencyMs: z.number().nullable().optional(),
   shredStreamActive: z.boolean(),
+  shredStreamListening: z.boolean().optional(),
+  shredStreamPacketsPerMin: z.number().int().nonnegative().optional(),
   botStatus: BotStatusSchema,
   lastError: z.string().nullable(),
 });
@@ -320,10 +348,17 @@ export const DEFAULT_RISK_LIMITS: RiskLimits = RiskLimitsSchema.parse({});
 export const DEFAULT_BOT_CONFIG: BotConfig = BotConfigSchema.parse({});
 
 export { PaperPortfolio } from "./paper-portfolio.js";
-export type { PaperPortfolioConfig, PaperPositionSide, PaperTradeAction } from "./paper-portfolio.js";
+export type { PaperPortfolioConfig, PaperPortfolioState, PaperPositionSide, PaperTradeAction } from "./paper-portfolio.js";
+export {
+  PAPER_MARGIN_FRACTION,
+  computePaperPerpSizing,
+  formatPaperTradeReceipt,
+} from "./paper-perps.js";
+export type { PaperPerpSizing } from "./paper-perps.js";
 export {
   GLOSSARY,
   STRATEGY_HELP,
+  INTEL_PROFILE_HELP,
   TIMEFRAME_HELP,
   PAGE_GUIDES,
   type PageGuideKey,
@@ -331,4 +366,5 @@ export {
 export * from "./prices.js";
 export * from "./birdeye-mints.js";
 export * from "./candle-chart.js";
+export type { ReadRpcClass } from "./rpc-routing.js";
 export * from "./rpc-routing.js";

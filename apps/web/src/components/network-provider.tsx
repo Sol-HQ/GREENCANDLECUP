@@ -15,6 +15,8 @@ import { api } from "@/lib/utils";
 type NetworkState = NetworkConfig & {
   walletRpcUrl: string;
   walletRpcMasked?: string;
+  phoenixRpcMasked?: string;
+  txRpcMasked?: string;
   botRpcMasked?: string;
 };
 

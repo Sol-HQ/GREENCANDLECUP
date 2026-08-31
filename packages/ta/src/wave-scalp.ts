@@ -12,6 +12,12 @@ export type WaveScalpConfig = {
   stopLossPct?: number;
   swingLookback?: number;
   nearExtremePct?: number;
+  /** Skip entries when last bar volume below this fraction of lookback average. */
+  minVolumeRatio?: number;
+  /** Minimum high-low range as % of price — skip chop too tight to pay fees. */
+  minSwingRangePct?: number;
+  /** Phoenix taker fee in bps — used for round-trip cost math on entries. */
+  takerFeeBps?: number;
 };
 
 export const DEFAULT_WAVE_SCALP_CONFIG: Required<WaveScalpConfig> = {
@@ -19,6 +25,9 @@ export const DEFAULT_WAVE_SCALP_CONFIG: Required<WaveScalpConfig> = {
   stopLossPct: 4,
   swingLookback: 20,
   nearExtremePct: 0.35,
+  minVolumeRatio: 0.35,
+  minSwingRangePct: 0.8,
+  takerFeeBps: 5,
 };
 
 export type WaveScalpAnalysis = {
@@ -43,10 +52,19 @@ export function analyzeWaveScalp(
     stopLossPct = DEFAULT_WAVE_SCALP_CONFIG.stopLossPct,
     swingLookback = DEFAULT_WAVE_SCALP_CONFIG.swingLookback,
     nearExtremePct = DEFAULT_WAVE_SCALP_CONFIG.nearExtremePct,
+    minVolumeRatio = DEFAULT_WAVE_SCALP_CONFIG.minVolumeRatio,
+    minSwingRangePct = DEFAULT_WAVE_SCALP_CONFIG.minSwingRangePct,
+    takerFeeBps = DEFAULT_WAVE_SCALP_CONFIG.takerFeeBps,
   } = config;
 
   const markPrice = candles.at(-1)?.close ?? 0;
   const slice = candles.slice(-swingLookback);
+  const lastBar = candles.at(-1);
+  const avgVolume =
+    slice.reduce((sum, c) => sum + (c.volume ?? 0), 0) / Math.max(slice.length, 1);
+  const volumeRatio =
+    avgVolume > 0 && lastBar ? (lastBar.volume ?? 0) / avgVolume : 1;
+  const volumeOk = volumeRatio >= minVolumeRatio;
 
   if (slice.length < 8 || markPrice <= 0) {
     return {
@@ -76,6 +94,56 @@ export function analyzeWaveScalp(
 
   const lowThreshold = nearExtremePct * 100;
   const highThreshold = (1 - nearExtremePct) * 100;
+  const rangePct = (span / markPrice) * 100;
+  const roundTripFeePct = (2 * takerFeeBps) / 100;
+  const minMovePct = roundTripFeePct + takeProfitPct * 0.4;
+
+  const entryRangeOk = () => {
+    if (rangePct < minSwingRangePct) {
+      return {
+        action: "hold" as const,
+        reason: `Range too tight (${rangePct.toFixed(2)}% < ${minSwingRangePct}% min) — fees would eat edge`,
+        rangeLow,
+        rangeHigh,
+        priceInRangePct,
+        unrealizedPnlPct: null,
+        markPrice,
+      };
+    }
+    return null;
+  };
+
+  const longRoomOk = () => {
+    const roomUpPct = ((rangeHigh - markPrice) / markPrice) * 100;
+    if (roomUpPct < minMovePct) {
+      return {
+        action: "hold" as const,
+        reason: `Near low but only ${roomUpPct.toFixed(2)}% room to swing high — need ~${minMovePct.toFixed(1)}% after fees`,
+        rangeLow,
+        rangeHigh,
+        priceInRangePct,
+        unrealizedPnlPct: null,
+        markPrice,
+      };
+    }
+    return null;
+  };
+
+  const shortRoomOk = () => {
+    const roomDownPct = ((markPrice - rangeLow) / markPrice) * 100;
+    if (roomDownPct < minMovePct) {
+      return {
+        action: "hold" as const,
+        reason: `Near high but only ${roomDownPct.toFixed(2)}% room to swing low — need ~${minMovePct.toFixed(1)}% after fees`,
+        rangeLow,
+        rangeHigh,
+        priceInRangePct,
+        unrealizedPnlPct: null,
+        markPrice,
+      };
+    }
+    return null;
+  };
 
   let unrealizedPnlPct: number | null = null;
   if (position === "long" && entryPriceUsd) {
@@ -175,9 +243,22 @@ export function analyzeWaveScalp(
   }
 
   if (priceInRangePct <= lowThreshold && microMomentum > 0) {
+    if (!volumeOk) {
+      return {
+        action: "hold",
+        reason: `Near low but volume dead (${(volumeRatio * 100).toFixed(0)}% of avg)`,
+        rangeLow,
+        rangeHigh,
+        priceInRangePct,
+        unrealizedPnlPct: null,
+        markPrice,
+      };
+    }
+    const blocked = entryRangeOk() ?? longRoomOk();
+    if (blocked) return blocked;
     return {
       action: "open_long",
-      reason: "Near swing low + momentum turning up",
+      reason: `Perp long near swing low · ${rangePct.toFixed(1)}% range · target +${takeProfitPct}% · vol ${(volumeRatio * 100).toFixed(0)}% avg`,
       rangeLow,
       rangeHigh,
       priceInRangePct,
@@ -187,9 +268,22 @@ export function analyzeWaveScalp(
   }
 
   if (priceInRangePct >= highThreshold && microMomentum < -0.0002) {
+    if (!volumeOk) {
+      return {
+        action: "hold",
+        reason: `Near high but volume dead (${(volumeRatio * 100).toFixed(0)}% of avg)`,
+        rangeLow,
+        rangeHigh,
+        priceInRangePct,
+        unrealizedPnlPct: null,
+        markPrice,
+      };
+    }
+    const blocked = entryRangeOk() ?? shortRoomOk();
+    if (blocked) return blocked;
     return {
       action: "open_short",
-      reason: "Near swing high + momentum turning down",
+      reason: `Perp short near swing high · ${rangePct.toFixed(1)}% range · target +${takeProfitPct}% · vol ${(volumeRatio * 100).toFixed(0)}% avg`,
       rangeLow,
       rangeHigh,
       priceInRangePct,

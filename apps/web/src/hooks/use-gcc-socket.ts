@@ -5,13 +5,15 @@ import type {
   GccMetrics,
   MarketSnapshot,
   OrderbookSnapshot,
+  PaperPortfolioState,
+  PaperTradeRecord,
   SystemHealth,
   TradeAlert,
   WsEvent,
 } from "@gcc/shared";
 import { WS_URL } from "@/lib/utils";
 
-export function useGccSocket() {
+export function useGccSocket(watchSymbol?: string) {
   const [market, setMarket] = useState<MarketSnapshot | null>(null);
   const [orderbook, setOrderbook] = useState<OrderbookSnapshot | null>(null);
   const [metrics, setMetrics] = useState<GccMetrics | null>(null);
@@ -20,7 +22,14 @@ export function useGccSocket() {
     Array<{ level: string; message: string; at: string }>
   >([]);
   const [alerts, setAlerts] = useState<TradeAlert[]>([]);
+  const [paperTrades, setPaperTrades] = useState<PaperTradeRecord[]>([]);
+  const [paperPortfolio, setPaperPortfolio] = useState<PaperPortfolioState | null>(null);
   const [connected, setConnected] = useState(false);
+
+  useEffect(() => {
+    setMarket(null);
+    setOrderbook(null);
+  }, [watchSymbol]);
 
   useEffect(() => {
     const ws = new WebSocket(WS_URL);
@@ -31,10 +40,14 @@ export function useGccSocket() {
       const payload = JSON.parse(event.data as string) as WsEvent;
       switch (payload.type) {
         case "market":
-          setMarket(payload.data);
+          if (!watchSymbol || payload.data.symbol === watchSymbol) {
+            setMarket(payload.data);
+          }
           break;
         case "orderbook":
-          setOrderbook(payload.data);
+          if (!watchSymbol || payload.data.symbol === watchSymbol) {
+            setOrderbook(payload.data);
+          }
           break;
         case "metrics":
           setMetrics(payload.data);
@@ -48,11 +61,20 @@ export function useGccSocket() {
         case "alert":
           setAlerts((prev) => [payload.data, ...prev].slice(0, 30));
           break;
+        case "paper_trade":
+          setPaperTrades((prev) => {
+            if (prev.some((p) => p.id === payload.data.id)) return prev;
+            return [payload.data, ...prev].slice(0, 100);
+          });
+          break;
+        case "paper_portfolio":
+          setPaperPortfolio(payload.data);
+          break;
       }
     };
 
     return () => ws.close();
-  }, []);
+  }, [watchSymbol]);
 
-  return { market, orderbook, metrics, health, logs, alerts, connected };
+  return { market, orderbook, metrics, health, logs, alerts, paperTrades, paperPortfolio, connected };
 }

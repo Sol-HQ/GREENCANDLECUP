@@ -30,3 +30,18 @@ export function sanitizeWalletRpcUrl(
 export function maskRpcApiKey(url: string): string {
   return url.replace(/api-key=[^&]+/i, "api-key=***");
 }
+
+export type ReadRpcClass = "public" | "dedicated" | "helius";
+
+/** Classify read RPC for infra dashboard — Helius must never be used here. */
+export function classifyReadRpcUrl(url: string): ReadRpcClass {
+  const trimmed = url.trim();
+  if (isHeliusRpcUrl(trimmed)) return "helius";
+  if (
+    /api\.mainnet-beta\.solana\.com/i.test(trimmed) ||
+    /api\.devnet\.solana\.com/i.test(trimmed)
+  ) {
+    return "public";
+  }
+  return "dedicated";
+}

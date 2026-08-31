@@ -6,12 +6,12 @@ export function decimalsForPrice(value: number): number {
   if (abs >= 1_000) return 2;
   if (abs >= 100) return 3;
   if (abs >= 1) return 4;
-  if (abs >= 0.1) return 5;
-  if (abs >= 0.01) return 6;
-  if (abs >= 0.001) return 7;
-  if (abs >= 0.0001) return 8;
-  if (abs >= 0.00001) return 9;
-  return 10;
+  if (abs >= 0.1) return 6;
+  if (abs >= 0.01) return 7;
+  if (abs >= 0.001) return 8;
+  if (abs >= 0.0001) return 9;
+  if (abs >= 0.00001) return 10;
+  return 11;
 }
 
 export function decimalsForTokenAmount(value: number): number {
@@ -100,4 +100,14 @@ export function formatUsd(
     return `$${formatWithDigits(n, digits)}`;
   }
   return formatPriceUsd(value);
+}
+
+/** lightweight-charts axis + crosshair — full tick precision for low-priced perps (JUP, etc.). */
+export function chartPriceFormatOptions(referencePrice: number) {
+  const precision = decimalsForPrice(referencePrice);
+  return {
+    type: "price" as const,
+    precision,
+    minMove: 10 ** -precision,
+  };
 }

@@ -1,6 +1,9 @@
 import {
   createPhoenixClient,
   type PhoenixClient,
+  type PhoenixMarketData,
+  type PhoenixOrderbookManager,
+  type PhoenixOrderbookSnapshot,
   Side,
 } from "@ellipsis-labs/rise";
 import type {
@@ -64,6 +67,9 @@ export type PhoenixClientBundle = {
   >;
   listMarkets: () => Promise<PhoenixMarketListing[]>;
   getMarketDetail: (symbol: string) => Promise<MarketDetail>;
+  /** Subscribe Phoenix WS streams for a symbol (idempotent). */
+  ensureSymbolStream: (symbol: string) => Promise<void>;
+  getWsStatus: () => { connected: boolean; symbols: string[] };
 };
 
 function tupleToLevels(levels: [number, number][]): OrderbookLevel[] {
@@ -85,19 +91,23 @@ export function createGccPhoenixClient(
   const client = createPhoenixClient({
     apiUrl: config.apiUrl ?? "https://perp-api.phoenix.trade",
     rpcUrl: config.rpcUrl,
-    ws: false,
+    ws: { connectMode: "eager" },
     exchangeMetadata: {
-      stream: false,
+      stream: true,
       priority: "api",
-      api: { liveUpdates: "none" },
-      // RPC is fallback for live ix building only — no background poll loop.
+      api: { liveUpdates: "ws" },
       rpc: { pollIntervalMs: 0 },
     },
   });
 
   let exchangeReady: Promise<unknown> | null = null;
-  let statsTick = 0;
-  let cachedMarkPrice: string | null = null;
+  let wsReady: Promise<void> | null = null;
+  let marketData: PhoenixMarketData | null = null;
+  let orderbooks: PhoenixOrderbookManager | null = null;
+  const symbolStreams = new Map<
+    string,
+    { obRelease: () => void; mdRelease: () => void }
+  >();
 
   const ready = async () => {
     if (!exchangeReady) {
@@ -107,6 +117,110 @@ export function createGccPhoenixClient(
       });
     }
     await exchangeReady;
+  };
+
+  const ensureWsReady = async () => {
+    await ready();
+    if (!wsReady) {
+      wsReady = (async () => {
+        marketData = client.marketData();
+        orderbooks = client.orderbooks();
+        await marketData.ready();
+      })().catch((error) => {
+        wsReady = null;
+        throw error;
+      });
+    }
+    await wsReady;
+  };
+
+  const mapBookSnapshot = (
+    symbol: string,
+    book: PhoenixOrderbookSnapshot,
+  ): OrderbookSnapshot => ({
+    symbol,
+    bids: book.bids.slice(0, 20).map((level) => ({
+      price: String(level.price),
+      size: String(level.size),
+    })),
+    asks: book.asks.slice(0, 20).map((level) => ({
+      price: String(level.price),
+      size: String(level.size),
+    })),
+    updatedAt: new Date(book.timestampMs || Date.now()).toISOString(),
+  });
+
+  const mapMarketFromCache = (
+    symbol: string,
+    book: PhoenixOrderbookSnapshot | null,
+    markPrice: number | null,
+    mid: number | null,
+  ): MarketSnapshot => {
+    const mark =
+      markPrice ?? mid ?? book?.mid ?? null;
+    const priceSource: MarketSnapshot["priceSource"] =
+      markPrice != null ? "phoenix" : book?.mid != null ? "orderbook_mid" : "phoenix";
+    return {
+      symbol,
+      markPriceUsd: mark != null ? String(mark) : null,
+      fundingRate: null,
+      bestBid: book?.bestBid ? String(book.bestBid.price) : null,
+      bestAsk: book?.bestAsk ? String(book.bestAsk.price) : null,
+      updatedAt: new Date().toISOString(),
+      priceSource,
+    };
+  };
+
+  const getCachedLiveFeed = (
+    symbol: string,
+  ): { market: MarketSnapshot; orderbook: OrderbookSnapshot } | null => {
+    const sym = symbol.toUpperCase();
+    const book = orderbooks?.peek(sym)?.snapshot() ?? null;
+    const row = marketData?.market(sym);
+    if (!book && !row) return null;
+    const market = mapMarketFromCache(
+      sym,
+      book,
+      row?.markPrice ?? null,
+      row?.mid ?? null,
+    );
+    if (!market.markPriceUsd && !book) return null;
+    const orderbook = book
+      ? mapBookSnapshot(sym, book)
+      : {
+          symbol: sym,
+          bids: market.bestBid ? [{ price: market.bestBid, size: "0" }] : [],
+          asks: market.bestAsk ? [{ price: market.bestAsk, size: "0" }] : [],
+          updatedAt: market.updatedAt,
+        };
+    return { market, orderbook };
+  };
+
+  const ensureSymbolStream = async (symbol: string) => {
+    const sym = symbol.trim().toUpperCase();
+    if (!sym || symbolStreams.has(sym)) return;
+    try {
+      await ensureWsReady();
+      const obRes = await orderbooks!.prefetch(sym);
+      const mdRes = marketData!.resource(sym);
+      const releases = {
+        obRelease: obRes.retain(),
+        mdRelease: mdRes.retain(),
+      };
+      symbolStreams.set(sym, releases);
+      await Promise.all([obRes.ready(), mdRes.ready()]);
+    } catch {
+      symbolStreams.delete(sym);
+      throw new Error(`Phoenix WS stream failed for ${sym}`);
+    }
+  };
+
+  const getWsStatus = () => {
+    const status = marketData?.status();
+    return {
+      connected: status?.isConnected === true,
+      symbols: [...symbolStreams.keys()],
+    };
   };
 
   type RawOrderbook = {
@@ -139,34 +253,38 @@ export function createGccPhoenixClient(
   const getLiveFeed = async (
     symbol: string,
   ): Promise<{ market: MarketSnapshot; orderbook: OrderbookSnapshot }> => {
-    await ready();
-    const book = await client.api.orderbook().getOrderbook(symbol);
-    const orderbook = mapOrderbook(symbol, book);
+    const sym = symbol.toUpperCase();
+    try {
+      await ensureSymbolStream(sym);
+      const cached = getCachedLiveFeed(sym);
+      if (cached) return cached;
+    } catch {
+      // fall through to REST bootstrap
+    }
 
+    await ready();
+    const book = await client.api.orderbook().getOrderbook(sym);
+    const orderbook = mapOrderbook(sym, book);
     let markPriceUsd: string | null =
-      book.mid != null ? String(book.mid) : cachedMarkPrice;
+      book.mid != null ? String(book.mid) : null;
     let priceSource: MarketSnapshot["priceSource"] =
       book.mid != null ? "orderbook_mid" : "phoenix";
 
-    // Phoenix stats are a second HTTP call — fetch occasionally, not every tick.
-    if (statsTick++ % 5 === 0) {
-      try {
-        const stats = await client.api.markets().getLatestMarketStats(symbol);
-        const mark =
-          (stats as { mark_price?: unknown; markPrice?: unknown }).mark_price ??
-          (stats as { markPrice?: unknown }).markPrice;
-        if (mark != null) {
-          markPriceUsd = String(mark);
-          cachedMarkPrice = markPriceUsd;
-          priceSource = "phoenix";
-        }
-      } catch {
-        // keep last good mark or mid
+    try {
+      const stats = await client.api.markets().getLatestMarketStats(sym);
+      const mark =
+        (stats as { mark_price?: unknown; markPrice?: unknown }).mark_price ??
+        (stats as { markPrice?: unknown }).markPrice;
+      if (mark != null) {
+        markPriceUsd = String(mark);
+        priceSource = "phoenix";
       }
+    } catch {
+      // keep mid
     }
 
     const market: MarketSnapshot = {
-      symbol,
+      symbol: sym,
       markPriceUsd,
       fundingRate: null,
       bestBid: book.bids[0] ? String(book.bids[0][0]) : null,
@@ -182,20 +300,39 @@ export function createGccPhoenixClient(
     symbol: string,
     onUpdate: (book: OrderbookSnapshot) => void,
   ) => {
+    const sym = symbol.toUpperCase();
     let active = true;
-    const poll = async () => {
-      while (active) {
-        try {
-          onUpdate(await getOrderbook(symbol));
-        } catch {
-          // retry on transient errors
-        }
-        await new Promise((r) => setTimeout(r, 5000));
+    let unsubscribe: (() => void) | null = null;
+
+    void (async () => {
+      try {
+        await ensureSymbolStream(sym);
+        const resource = orderbooks!.peek(sym);
+        if (!resource || !active) return;
+        unsubscribe = resource.subscribe((state) => {
+          if (!active || !state.book) return;
+          onUpdate(mapBookSnapshot(sym, state.book));
+        });
+        const snap = resource.snapshot();
+        if (snap) onUpdate(mapBookSnapshot(sym, snap));
+      } catch {
+        const poll = async () => {
+          while (active) {
+            try {
+              onUpdate(await getOrderbook(sym));
+            } catch {
+              // retry
+            }
+            await new Promise((r) => setTimeout(r, 5000));
+          }
+        };
+        void poll();
       }
-    };
-    void poll();
+    })();
+
     return () => {
       active = false;
+      unsubscribe?.();
     };
   };
 
@@ -413,6 +550,8 @@ export function createGccPhoenixClient(
     buildMarketOrderIx,
     listMarkets,
     getMarketDetail,
+    ensureSymbolStream,
+    getWsStatus,
     getCandles: async (symbol, timeframe = "15m", limit = 100) => {
       await ready();
       const candles = await client.api.candles().getCandles(symbol, {

@@ -1,3 +1,9 @@
+import type { PaperPerpSizing } from "./paper-perps.js";
+import { computePaperPerpSizing } from "./paper-perps.js";
+
+export { PAPER_MARGIN_FRACTION, computePaperPerpSizing, formatPaperTradeReceipt } from "./paper-perps.js";
+export type { PaperPerpSizing } from "./paper-perps.js";
+
 function newTradeId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();
@@ -30,6 +36,9 @@ export type PaperTradeRecord = {
 export type PaperPortfolioState = {
   startingBalanceUsdc: number;
   balanceUsdc: number;
+  equityUsdc: number;
+  minBalanceUsdc: number;
+  alive: boolean;
   positionSide: PaperPositionSide;
   positionSizeBase: number;
   entryPriceUsd: number | null;
@@ -37,18 +46,21 @@ export type PaperPortfolioState = {
   unrealizedPnlUsd: number;
   tradeCount: number;
   updatedAt: string;
-};
+} & PaperPerpSizing;
 
 export type PaperPortfolioConfig = {
   startingBalanceUsdc: number;
   leverage: number;
   marginFraction: number;
+  /** Taker fee in bps — deducted on each open/close (round trip ≈ 2×). */
+  takerFeeBps: number;
 };
 
 const DEFAULT_CONFIG: PaperPortfolioConfig = {
   startingBalanceUsdc: 100,
   leverage: 2,
   marginFraction: 0.5,
+  takerFeeBps: 5,
 };
 
 export class PaperPortfolio {
@@ -71,6 +83,48 @@ export class PaperPortfolio {
     this.trades = [];
   }
 
+  exportSnapshot(): {
+    startingBalanceUsdc: number;
+    balanceUsdc: number;
+    positionSide: PaperPositionSide;
+    positionSizeBase: number;
+    entryPriceUsd: number | null;
+    leverage: number;
+    trades: PaperTradeRecord[];
+  } {
+    return {
+      startingBalanceUsdc: this.config.startingBalanceUsdc,
+      balanceUsdc: this.balanceUsdc,
+      positionSide: this.positionSide,
+      positionSizeBase: this.positionSizeBase,
+      entryPriceUsd: this.entryPriceUsd,
+      leverage: this.config.leverage,
+      trades: [...this.trades],
+    };
+  }
+
+  importSnapshot(snapshot: {
+    startingBalanceUsdc?: number;
+    balanceUsdc: number;
+    positionSide: PaperPositionSide;
+    positionSizeBase: number;
+    entryPriceUsd: number | null;
+    leverage?: number;
+    trades?: PaperTradeRecord[];
+  }) {
+    if (snapshot.startingBalanceUsdc != null) {
+      this.config.startingBalanceUsdc = snapshot.startingBalanceUsdc;
+    }
+    if (snapshot.leverage != null) {
+      this.config.leverage = snapshot.leverage;
+    }
+    this.balanceUsdc = snapshot.balanceUsdc;
+    this.positionSide = snapshot.positionSide;
+    this.positionSizeBase = snapshot.positionSizeBase;
+    this.entryPriceUsd = snapshot.entryPriceUsd;
+    if (snapshot.trades) this.trades = [...snapshot.trades];
+  }
+
   getPositionSide(): PaperPositionSide {
     return this.positionSide;
   }
@@ -83,7 +137,15 @@ export class PaperPortfolio {
     return [...this.trades];
   }
 
-  getState(markPriceUsd: number | null): PaperPortfolioState {
+  /** Restore trade log for charts / history (does not replay positions). */
+  loadTradeHistory(trades: PaperTradeRecord[]) {
+    this.trades = [...trades];
+  }
+
+  getState(
+    markPriceUsd: number | null,
+    minBalanceUsdc = 0,
+  ): PaperPortfolioState {
     let unrealized = 0;
     if (
       this.positionSide !== "flat" &&
@@ -97,9 +159,13 @@ export class PaperPortfolio {
           : this.entryPriceUsd - markPriceUsd;
       unrealized = diff * this.positionSizeBase;
     }
-    return {
+    const equityUsdc = this.balanceUsdc + unrealized;
+    const core = {
       startingBalanceUsdc: this.config.startingBalanceUsdc,
       balanceUsdc: this.balanceUsdc,
+      equityUsdc,
+      minBalanceUsdc,
+      alive: equityUsdc > minBalanceUsdc,
       positionSide: this.positionSide,
       positionSizeBase: this.positionSizeBase,
       entryPriceUsd: this.entryPriceUsd,
@@ -108,13 +174,34 @@ export class PaperPortfolio {
       tradeCount: this.trades.length,
       updatedAt: new Date().toISOString(),
     };
+    return {
+      ...core,
+      ...computePaperPerpSizing({
+        balanceUsdc: this.balanceUsdc,
+        leverage: this.config.leverage,
+        marginFraction: this.config.marginFraction,
+        positionSide: this.positionSide,
+        positionSizeBase: this.positionSizeBase,
+        entryPriceUsd: this.entryPriceUsd,
+        markPriceUsd: markPriceUsd,
+        unrealizedPnlUsd: unrealized,
+      }),
+    };
   }
 
-  computeSizeBase(priceUsd: number): number {
-    const margin = this.balanceUsdc * this.config.marginFraction;
+  computeSizeBase(priceUsd: number, riskScale = 1): number {
+    if (this.balanceUsdc <= 0) return 0;
+    const scale = Math.max(0, Math.min(1, riskScale));
+    const margin = this.balanceUsdc * this.config.marginFraction * scale;
     const notional = margin * this.config.leverage;
-    if (priceUsd <= 0) return 0;
+    if (priceUsd <= 0 || notional <= 0) return 0;
     return notional / priceUsd;
+  }
+
+  canOpen(priceUsd: number, minBalanceUsdc: number): boolean {
+    if (this.positionSide !== "flat") return false;
+    if (this.balanceUsdc <= minBalanceUsdc) return false;
+    return this.computeSizeBase(priceUsd) > 0;
   }
 
   openLong(params: {
@@ -218,10 +305,13 @@ export class PaperPortfolio {
   private record(
     partial: Omit<PaperTradeRecord, "id" | "at" | "notionalUsd" | "balanceUsdc">,
   ): PaperTradeRecord {
+    const notionalUsd = partial.priceUsd * partial.sizeBase;
+    const feeUsd = notionalUsd * (this.config.takerFeeBps / 10_000);
+    this.balanceUsdc -= feeUsd;
     const trade: PaperTradeRecord = {
       id: newTradeId(),
       at: new Date().toISOString(),
-      notionalUsd: partial.priceUsd * partial.sizeBase,
+      notionalUsd,
       balanceUsdc: this.balanceUsdc,
       ...partial,
     };

@@ -26,13 +26,14 @@ export function candleHistoryLimit(_timeframe: CandleTimeframe): number {
 export function candlePollIntervalMs(timeframe: CandleTimeframe): number {
   switch (timeframe) {
     case "1m":
+      return 15_000;
     case "5m":
-      return 3_000;
+      return 30_000;
     case "15m":
     case "30m":
-      return 5_000;
+      return 60_000;
     default:
-      return 15_000;
+      return 120_000;
   }
 }
 

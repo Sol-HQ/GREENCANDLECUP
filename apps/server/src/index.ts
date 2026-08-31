@@ -32,8 +32,10 @@ import {
   type TradeAlert,
   type WsEvent,
   type SolanaCluster,
+  type BotConfig,
+  classifyReadRpcUrl,
 } from "@gcc/shared";
-import { analyzeCandles, analyzeWaveScalp } from "@gcc/ta";
+import { analyzeAdaptive, analyzeCandles, analyzeWaveScalp } from "@gcc/ta";
 import { RiskGate } from "@gcc/risk";
 import {
   getPhoenixReadRpcUrl,
@@ -42,6 +44,23 @@ import {
   maskRpcUrl,
   validateRpcRoutingAtStartup,
 } from "./env.js";
+import { buildInfraStatus, probeReadRpcLatency } from "./infra.js";
+import {
+  clearPaperStore,
+  loadPaperStore,
+  mergeTradeHistory,
+  savePaperStore,
+  type BotArmSnapshot,
+} from "./paper-store.js";
+import {
+  clearPriceTape,
+  getPaperReplay,
+  recordPriceTick,
+} from "./price-tape.js";
+import {
+  resolveShredStreamPort,
+  ShredStreamListener,
+} from "./shredstream.js";
 
 validateRpcRoutingAtStartup();
 
@@ -49,9 +68,15 @@ const PORT = Number(process.env.PORT ?? 8787);
 const API_KEY = process.env.API_KEY ?? "dev";
 const PHOENIX_READ_RPC_URL = getPhoenixReadRpcUrl();
 const TX_RPC_URL = getTxRpcUrl();
+const SHRED_PORT = resolveShredStreamPort();
+const shredListener = new ShredStreamListener(
+  SHRED_PORT,
+  process.env.SHREDSTREAM_BIND_HOST?.trim() || "0.0.0.0",
+);
+let cachedReadRpcLatencyMs: number | null = null;
 let watchSymbol = process.env.DEFAULT_SYMBOL ?? DEFAULT_SYMBOL;
 const SYMBOL = () => watchSymbol;
-const SERVER_POLL_MS = Number(process.env.SERVER_POLL_MS ?? 3000);
+const SERVER_POLL_MS = Number(process.env.SERVER_POLL_MS ?? 5000);
 
 let walletCluster: SolanaCluster =
   process.env.SOLANA_CLUSTER === "devnet" ? "devnet" : "mainnet-beta";
@@ -61,14 +86,113 @@ const networkSnapshot = () =>
     walletCluster,
     tradingMode: bot.getConfig().mode,
     phoenixNetwork: "mainnet",
-    shredStreamConfigured: Boolean(process.env.SHREDSTREAM_UDP_PORT),
+    shredStreamConfigured: Boolean(SHRED_PORT),
     gccUsesMainnet: true,
+    phoenixApiHost: (
+      process.env.PHOENIX_API_URL ?? "https://perp-api.phoenix.trade"
+    )
+      .replace(/^https?:\/\//, "")
+      .replace(/\/$/, ""),
+    readRpcClass: classifyReadRpcUrl(PHOENIX_READ_RPC_URL),
+    vpsPublicIp: process.env.VPS_PUBLIC_IP?.trim() || null,
   });
+
+function healthPayload(lastError: string | null, phoenixPollLatencyMs: number | null) {
+  const shred = shredListener.getStatus();
+  const ws = phoenix.getWsStatus();
+  return {
+    phoenixConnected: lastError == null,
+    phoenixWsConnected: ws.connected,
+    phoenixWsSymbols: ws.symbols,
+    phoenixPollLatencyMs,
+    rpcLatencyMs: phoenixPollLatencyMs,
+    readRpcLatencyMs: cachedReadRpcLatencyMs,
+    shredStreamActive: shred.active,
+    shredStreamListening: shred.listening,
+    shredStreamPacketsPerMin: shred.packetsLastMinute,
+    botStatus: bot.getStatus(),
+    lastError,
+  };
+}
 
 const phoenix = createGccPhoenixClient({
   rpcUrl: PHOENIX_READ_RPC_URL,
   apiUrl: process.env.PHOENIX_API_URL,
 });
+
+type CachedCandles = Awaited<ReturnType<typeof phoenix.getCandles>>;
+const candleCache = new Map<string, { at: number; candles: CachedCandles }>();
+const candleInflight = new Map<string, Promise<CachedCandles>>();
+
+const CANDLE_TTL_MS: Record<string, number> = {
+  "1m": 30_000,
+  "5m": 60_000,
+  "15m": 90_000,
+  "30m": 120_000,
+  "1h": 180_000,
+  "4h": 300_000,
+  "1d": 600_000,
+};
+
+function candleCacheKey(symbol: string, timeframe: string) {
+  return `${symbol}:${timeframe}`;
+}
+
+function candleTtlMs(timeframe: string) {
+  return CANDLE_TTL_MS[timeframe] ?? 60_000;
+}
+
+async function getCandlesCached(
+  symbol: string,
+  timeframe: string,
+  limit = 120,
+): Promise<CachedCandles> {
+  const key = candleCacheKey(symbol, timeframe);
+  const ttl = candleTtlMs(timeframe);
+  const hit = candleCache.get(key);
+  const now = Date.now();
+
+  if (now < phoenixBackoffUntil && hit) {
+    return hit.candles.slice(-limit);
+  }
+  if (hit && now - hit.at < ttl) {
+    return hit.candles.slice(-limit);
+  }
+
+  const inflight = candleInflight.get(key);
+  if (inflight) {
+    const candles = await inflight;
+    return candles.slice(-limit);
+  }
+
+  const promise = (async () => {
+    try {
+      const candles = await phoenix.getCandles(symbol, timeframe, 1000);
+      candleCache.set(key, { at: Date.now(), candles });
+      return candles;
+    } catch (error) {
+      const rateLimited = /429|rate.?limit|too many requests/i.test(
+        String(error),
+      );
+      if (rateLimited) {
+        phoenixBackoffUntil = Date.now() + 90_000;
+        if (hit) return hit.candles;
+        return [];
+      }
+      throw error;
+    } finally {
+      candleInflight.delete(key);
+    }
+  })();
+
+  candleInflight.set(key, promise);
+  const candles = await promise;
+  return candles.slice(-limit);
+}
+
+let moversCache: { at: number; rows: unknown[] } | null = null;
+const MOVERS_CACHE_MS = 60_000;
+let phoenixBackoffUntil = 0;
 
 const riskGate = new RiskGate(DEFAULT_RISK_LIMITS);
 const trading = new TradingCore(
@@ -82,9 +206,19 @@ const trading = new TradingCore(
 );
 
 const logs: Array<{ level: string; message: string; at: string }> = [];
-const alerts: TradeAlert[] = [];
+const bootPaper = loadPaperStore();
+const alerts: TradeAlert[] = [...(bootPaper.savedAlerts ?? [])];
+let tradeHistory = bootPaper.historyTrades ?? [];
 let lastAlertAt = 0;
 let lastMarkPrice: number | null = null;
+const clients = new Set<WebSocket>();
+
+function broadcast(event: WsEvent) {
+  const payload = JSON.stringify(event);
+  for (const client of clients) {
+    if (client.readyState === WebSocket.OPEN) client.send(payload);
+  }
+}
 
 const pushAlert = (partial: Omit<TradeAlert, "id" | "at">) => {
   const entry: TradeAlert = {
@@ -95,6 +229,12 @@ const pushAlert = (partial: Omit<TradeAlert, "id" | "at">) => {
   alerts.unshift(entry);
   if (alerts.length > 50) alerts.pop();
   broadcast({ type: "alert", data: entry });
+  try {
+    const store = loadPaperStore();
+    savePaperStore({ ...store, savedAlerts: alerts.slice(0, 50) });
+  } catch {
+    // disk optional
+  }
 };
 
 const pushLog = (level: "info" | "warn" | "error", message: string) => {
@@ -121,8 +261,10 @@ const bot = new BotEngine(
   trading,
   pushLog,
   async (symbol, timeframe, limit = 120) =>
-    phoenix.getCandles(symbol, timeframe, limit),
+    getCandlesCached(symbol, timeframe, limit),
   (trade) => {
+    recordPriceTick(trade.symbol, trade.priceUsd, "trade");
+    persistPaperState();
     broadcast({ type: "paper_trade", data: trade });
     broadcast({
       type: "paper_portfolio",
@@ -144,6 +286,59 @@ const bot = new BotEngine(
     });
   },
 );
+
+function configForArm(): Omit<BotConfig, "status"> {
+  const { status: _status, ...rest } = bot.getConfig();
+  return rest;
+}
+
+function getAllPaperTrades() {
+  return mergeTradeHistory(tradeHistory, bot.getPaperTrades());
+}
+
+function persistPaperState() {
+  const snap = bot.exportPaperSession();
+  if (bot.getStatus() === "dead") {
+    botArmState = null;
+  }
+  tradeHistory = mergeTradeHistory(tradeHistory, snap.trades);
+  savePaperStore({
+    trades: snap.trades,
+    historyTrades: tradeHistory,
+    portfolio: snap.portfolio,
+    savedAt: new Date().toISOString(),
+    arm: botArmState,
+    savedAlerts: alerts.slice(0, 50),
+  });
+}
+
+function setBotArmed(armed: boolean) {
+  if (!armed) {
+    botArmState = null;
+  } else {
+    botArmState = {
+      armed: true,
+      watchSymbol: SYMBOL(),
+      config: configForArm(),
+    };
+  }
+  persistPaperState();
+}
+
+let botArmState: BotArmSnapshot | null = bootPaper.arm ?? null;
+bot.restorePaperSession({
+  trades: bootPaper.trades,
+  portfolio: bootPaper.portfolio,
+});
+bot.loadTradeHistory(
+  mergeTradeHistory(bootPaper.historyTrades ?? [], bootPaper.trades),
+);
+if (bootPaper.portfolio) {
+  pushLog(
+    "info",
+    `Paper session restored from disk (${bootPaper.trades.length} trades, ${bootPaper.portfolio.positionSide})`,
+  );
+}
 
 const app = new Hono();
 app.use("/*", cors());
@@ -237,13 +432,16 @@ app.get("/api/market/:symbol/briefing", async (c) => {
 
 app.get("/api/markets/movers", async (c) => {
   try {
+    if (moversCache && Date.now() - moversCache.at < MOVERS_CACHE_MS) {
+      return c.json(moversCache.rows);
+    }
     const markets = await phoenix.listMarkets();
     const picks = ["JUP", "SOL", "WIF", "POPCAT", "BTC", "ETH"].filter((s) =>
       markets.some((m) => m.symbol === s),
     );
     const rows = await Promise.all(
       picks.map(async (symbol) => {
-        const candles = await phoenix.getCandles(symbol, "5m", 24);
+        const candles = await getCandlesCached(symbol, "5m", 24);
         if (candles.length < 5) return null;
         const highs = candles.map((x) => x.high);
         const lows = candles.map((x) => x.low);
@@ -254,11 +452,11 @@ app.get("/api/markets/movers", async (c) => {
         return { symbol, rangePct, volume: vol, bars: candles.length };
       }),
     );
-    return c.json(
-      rows
-        .filter((r): r is NonNullable<typeof r> => r != null)
-        .sort((a, b) => b.rangePct - a.rangePct),
-    );
+    const sorted = rows
+      .filter((r): r is NonNullable<typeof r> => r != null)
+      .sort((a, b) => b.rangePct - a.rangePct);
+    moversCache = { at: Date.now(), rows: sorted };
+    return c.json(sorted);
   } catch (error) {
     return c.json(
       {
@@ -273,11 +471,35 @@ app.get("/api/paper/portfolio", (c) =>
   c.json(bot.getPaperPortfolio()),
 );
 
-app.get("/api/paper/trades", (c) => c.json({ trades: bot.getPaperTrades() }));
+app.get("/api/paper/trades", (c) =>
+  c.json({ trades: getAllPaperTrades() }),
+);
+
+app.get("/api/paper/replay", (c) => {
+  const symbol = (c.req.query("symbol") ?? bot.getConfig().symbol).toUpperCase();
+  const minutes = Number(c.req.query("minutes") ?? "5");
+  const delaySec = Number(c.req.query("delaySec") ?? "0");
+  return c.json(
+    getPaperReplay({
+      symbol,
+      minutes,
+      delaySec,
+      trades: bot.getPaperTrades(),
+    }),
+  );
+});
 
 app.post("/api/paper/reset", (c) => {
-  bot.updateConfig({
-    paperBalanceUsdc: bot.getConfig().paperBalanceUsdc,
+  clearPriceTape();
+  bot.resetPaper(bot.getConfig().paperBalanceUsdc);
+  tradeHistory = [];
+  bot.loadTradeHistory([]);
+  clearPaperStore({ wipeHistory: true });
+  botArmState = null;
+  persistPaperState();
+  broadcast({
+    type: "paper_portfolio",
+    data: bot.getPaperPortfolio(),
   });
   return c.json(bot.getPaperPortfolio());
 });
@@ -303,7 +525,7 @@ app.patch("/api/symbol", async (c) => {
   const next = body.symbol?.trim().toUpperCase();
   if (!next) return c.json({ error: "symbol required" }, 400);
   watchSymbol = next;
-  bot.updateConfig({ symbol: next });
+  // Chart/scanner symbol only — do not touch bot config (avoids pause/start churn).
   lastMarkPrice = null;
   return c.json({ symbol: watchSymbol });
 });
@@ -355,7 +577,7 @@ app.get("/api/candles/:symbol", async (c) => {
       );
     }
     const limit = Number(c.req.query("limit") ?? "100");
-    return c.json(await phoenix.getCandles(symbol, timeframe, limit));
+    return c.json(await getCandlesCached(symbol, timeframe, limit));
   } catch (error) {
     return c.json(
       { error: error instanceof Error ? error.message : "Candles failed" },
@@ -376,9 +598,29 @@ app.get("/api/ta/:symbol", async (c) => {
     if (strategy === "manual") {
       return c.json({ trend: "flat", signal: null, reason: "Manual mode" });
     }
-    const candles = await phoenix.getCandles(symbol, timeframe, 120);
-    if (strategy === "wave_scalp") {
+    const candles = await getCandlesCached(symbol, timeframe, 120);
+    if (strategy === "wave_scalp" || strategy === "adaptive") {
       const paper = bot.getPaperPortfolio();
+      if (strategy === "adaptive") {
+        const structure = await getCandlesCached(symbol, "5m", 72);
+        const cfg = bot.getConfig();
+        return c.json(
+          analyzeAdaptive(
+            candles,
+            paper.positionSide,
+            paper.entryPriceUsd,
+            {
+              takerFeeBps: cfg.paperTakerFeeBps,
+              intelProfile: cfg.intelProfile,
+              trendTakeProfitPct: Math.max(1.8, cfg.takeProfitPct * 0.35),
+              trendStopLossPct: Math.max(1, cfg.stopLossPct * 0.4),
+              scalpTakeProfitPct: Math.min(1.5, cfg.takeProfitPct * 0.2),
+              scalpStopLossPct: Math.min(1.2, cfg.stopLossPct * 0.25),
+            },
+            structure,
+          ),
+        );
+      }
       return c.json(
         analyzeWaveScalp(candles, paper.positionSide, paper.entryPriceUsd, {
           takeProfitPct: bot.getConfig().takeProfitPct,
@@ -406,7 +648,13 @@ app.get("/api/network", (c) =>
     walletRpcMasked: getPublicWalletRpcUrl(walletCluster),
     phoenixRpcMasked: maskRpcUrl(PHOENIX_READ_RPC_URL),
     txRpcMasked: maskRpcUrl(TX_RPC_URL),
+    phoenixDataPath:
+      "HTTP API (candles, orderbook, mark) — not Solana RPC",
   }),
+);
+
+app.get("/api/infra", async (c) =>
+  c.json(await buildInfraStatus(shredListener.getStatus())),
 );
 
 app.patch("/api/network", async (c) => {
@@ -441,6 +689,7 @@ app.get("/api/bot", (c) =>
   c.json({
     config: bot.getConfig(),
     status: bot.getStatus(),
+    armed: botArmState?.armed === true,
     analysis: bot.getLastAnalysis(),
     briefing: bot.getBriefing(),
     paper: bot.getPaperPortfolio(),
@@ -457,18 +706,80 @@ app.patch("/api/bot", async (c) => {
 });
 
 app.post("/api/bot/start", (c) => {
-  void bot.start();
-  return c.json({ status: bot.getStatus() });
+  const status = bot.getStatus();
+  const stored = loadPaperStore();
+  const hasOpenSession =
+    stored.portfolio != null &&
+    (stored.portfolio.positionSide !== "flat" || stored.trades.length > 0);
+
+  if (status === "stopped" && hasOpenSession) {
+    bot.restorePaperSession({
+      trades: stored.trades,
+      portfolio: stored.portfolio,
+    });
+  }
+
+  const freshPaper = status === "paused" ? false : !hasOpenSession;
+  setBotArmed(true);
+  void bot.start({ freshPaper });
+  return c.json({
+    status: bot.getStatus(),
+    armed: true,
+    paper: bot.getPaperPortfolio(),
+  });
+});
+
+/** Fresh $100 JUP paper run — adaptive strategy, survival rules, then go. */
+app.post("/api/bot/arm-overnight", async (c) => {
+  bot.stop();
+  watchSymbol = "JUP";
+  bot.updateConfig({
+    symbol: "JUP",
+    mode: "paper",
+    strategy: "adaptive",
+    intelProfile: "aggressive",
+    candleTimeframe: "1m",
+    paperBalanceUsdc: 100,
+    paperMinBalanceUsdc: 5,
+    takeProfitPct: 7,
+    stopLossPct: 4,
+    paperLeverage: 2,
+    pollIntervalMs: 12_000,
+    warmupScanCount: 3,
+  });
+  tradeHistory = mergeTradeHistory(tradeHistory, bot.getPaperTrades());
+  bot.resetPaper(100);
+  bot.loadTradeHistory(tradeHistory);
+  clearPriceTape("JUP");
+  persistPaperState();
+  await bot.start({ freshPaper: false });
+  setBotArmed(true);
+  pushLog(
+    "info",
+    "Overnight arm: JUP adaptive · aggressive conviction · $100 paper · dead below $5 equity",
+  );
+  broadcast({
+    type: "paper_portfolio",
+    data: bot.getPaperPortfolio(),
+  });
+  return c.json({
+    status: bot.getStatus(),
+    armed: true,
+    config: bot.getConfig(),
+    symbol: watchSymbol,
+    paper: bot.getPaperPortfolio(),
+  });
 });
 
 app.post("/api/bot/pause", (c) => {
   bot.pause();
-  return c.json({ status: bot.getStatus() });
+  return c.json({ status: bot.getStatus(), armed: botArmState?.armed === true });
 });
 
 app.post("/api/bot/stop", (c) => {
   bot.stop();
-  return c.json({ status: bot.getStatus() });
+  setBotArmed(false);
+  return c.json({ status: bot.getStatus(), armed: false });
 });
 
 app.post("/api/orders", async (c) => {
@@ -512,29 +823,54 @@ const server = createServer(getRequestListener(app.fetch));
 const wss = new WebSocketServer({ server, path: "/ws" });
 server.listen(PORT);
 
-const clients = new Set<WebSocket>();
+pushLog(
+  "info",
+  botArmState?.armed
+    ? "Armed bot will auto-resume after this boot"
+    : "Bot idle on startup — no scans or trades until you press Start on the Bot page",
+);
 
-function broadcast(event: WsEvent) {
-  const payload = JSON.stringify(event);
-  for (const client of clients) {
-    if (client.readyState === WebSocket.OPEN) client.send(payload);
+/** Resume overnight / armed runs after tsx watch or deploy restarts the API process. */
+async function resumeArmedBotIfNeeded() {
+  if (!botArmState?.armed) return;
+
+  watchSymbol = botArmState.watchSymbol;
+  bot.updateConfig(botArmState.config);
+  bot.restorePaperSession({
+    trades: bootPaper.trades,
+    portfolio: bootPaper.portfolio,
+  });
+
+  try {
+    await bot.start({ freshPaper: false });
+    pushLog(
+      "info",
+      `Bot auto-resumed (${botArmState.config.strategy} · ${botArmState.config.symbol} · ${botArmState.config.pollIntervalMs}ms poll)`,
+    );
+    broadcast({ type: "metrics", data: bot.getMetrics() });
+    broadcast({
+      type: "paper_portfolio",
+      data: bot.getPaperPortfolio(),
+    });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    pushLog("error", `Armed auto-resume failed: ${msg}`);
   }
 }
+
+void resumeArmedBotIfNeeded();
 
 wss.on("connection", (ws) => {
   clients.add(ws);
   const snapshot: WsEvent[] = [
     { type: "metrics", data: bot.getMetrics() },
     {
+      type: "paper_portfolio",
+      data: bot.getPaperPortfolio(),
+    },
+    {
       type: "health",
-      data: {
-        phoenixConnected: true,
-        phoenixPollLatencyMs: null,
-        rpcLatencyMs: null,
-        shredStreamActive: false,
-        botStatus: bot.getStatus(),
-        lastError: null,
-      },
+      data: healthPayload(null, null),
     },
     { type: "network", data: { ...networkSnapshot(), walletRpcUrl: getPublicWalletRpcUrl(walletCluster) } },
   ];
@@ -544,6 +880,12 @@ wss.on("connection", (ws) => {
   for (const entry of logs.slice(0, 20)) {
     ws.send(JSON.stringify({ type: "log", data: entry }));
   }
+  for (const trade of getAllPaperTrades()) {
+    ws.send(JSON.stringify({ type: "paper_trade", data: trade }));
+  }
+  for (const alert of alerts.slice(0, 20)) {
+    ws.send(JSON.stringify({ type: "alert", data: alert }));
+  }
   ws.on("close", () => clients.delete(ws));
 });
 
@@ -551,27 +893,61 @@ async function pollLoop() {
   await phoenix.ready();
   pushLog("info", "Phoenix client ready");
 
+  const warmSymbols = new Set<string>();
+  const warmStreams = async () => {
+    const symbols = [SYMBOL(), bot.getConfig().symbol];
+    for (const sym of symbols) {
+      if (!sym || warmSymbols.has(sym)) continue;
+      warmSymbols.add(sym);
+      try {
+        await phoenix.ensureSymbolStream(sym);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        pushLog("warn", `Phoenix WS warm-up failed for ${sym}: ${msg}`);
+      }
+    }
+    const ws = phoenix.getWsStatus();
+    pushLog(
+      "info",
+      `Phoenix WebSocket ${ws.connected ? "live" : "connecting"} · ${ws.symbols.join(", ") || "no streams"}`,
+    );
+  };
+  await warmStreams();
+
   setInterval(async () => {
     const start = Date.now();
     try {
       const uiSymbol = SYMBOL();
       const botSymbol = bot.getConfig().symbol;
+      if (!warmSymbols.has(uiSymbol)) warmSymbols.add(uiSymbol);
+      if (!warmSymbols.has(botSymbol)) warmSymbols.add(botSymbol);
+      await Promise.all([
+        phoenix.ensureSymbolStream(uiSymbol).catch(() => {}),
+        uiSymbol !== botSymbol
+          ? phoenix.ensureSymbolStream(botSymbol).catch(() => {})
+          : Promise.resolve(),
+      ]);
 
       let market;
       let orderbook;
+      let botMark = 0;
       if (uiSymbol === botSymbol) {
         const feed = await phoenix.getLiveFeed(uiSymbol);
         bot.onMarketUpdate(feed.market);
+        bot.onOrderbookUpdate(feed.orderbook);
         market = feed.market;
         orderbook = feed.orderbook;
+        botMark = Number(feed.market.markPriceUsd ?? 0);
       } else {
         const [botFeed, uiFeed] = await Promise.all([
           phoenix.getLiveFeed(botSymbol),
           phoenix.getLiveFeed(uiSymbol),
         ]);
         bot.onMarketUpdate(botFeed.market);
+        bot.onOrderbookUpdate(botFeed.orderbook);
         market = uiFeed.market;
         orderbook = uiFeed.orderbook;
+        botMark = Number(botFeed.market.markPriceUsd ?? 0);
       }
 
       broadcast({ type: "orderbook", data: orderbook });
@@ -590,39 +966,77 @@ async function pollLoop() {
         }
       }
       if (mark) lastMarkPrice = mark;
+      if (botMark) recordPriceTick(botSymbol, botMark, "poll");
+      if (uiSymbol !== botSymbol && mark) {
+        recordPriceTick(uiSymbol, mark, "poll");
+      }
       const latency = Date.now() - start;
       broadcast({ type: "market", data: market });
       broadcast({ type: "metrics", data: bot.getMetrics() });
+      const paperStatus = bot.getStatus();
+      if (paperStatus === "running" || bot.getPaperPortfolio().positionSide !== "flat") {
+        broadcast({
+          type: "paper_portfolio",
+          data: bot.getPaperPortfolio(),
+        });
+      }
       broadcast({
         type: "health",
-        data: {
-          phoenixConnected: true,
-          phoenixPollLatencyMs: latency,
-          rpcLatencyMs: latency,
-          shredStreamActive: false,
-          botStatus: bot.getStatus(),
-          lastError: null,
-        },
+        data: healthPayload(null, latency),
       });
     } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Phoenix poll failed";
       broadcast({
         type: "health",
-        data: {
-          phoenixConnected: false,
-          phoenixPollLatencyMs: null,
-          rpcLatencyMs: null,
-          shredStreamActive: false,
-          botStatus: bot.getStatus(),
-          lastError:
-            error instanceof Error ? error.message : "Phoenix poll failed",
-        },
+        data: healthPayload(message, null),
       });
     }
   }, SERVER_POLL_MS);
 }
 
+async function bootInfra() {
+  shredListener.start();
+  const shred = shredListener.getStatus();
+  if (shred.configured) {
+    pushLog(
+      "info",
+      `ShredStream listener on UDP :${shred.port} — waiting for Triton packets (register VPS IP with Triton)`,
+    );
+  }
+
+  cachedReadRpcLatencyMs = await probeReadRpcLatency(PHOENIX_READ_RPC_URL);
+  const infra = await buildInfraStatus(shredListener.getStatus());
+  pushLog(
+    "info",
+    `Data path: Phoenix WebSocket (mark + L2) with REST fallback · candles via HTTP (${infra.phoenixApiHost})`,
+  );
+  pushLog(
+    "info",
+    `Read RPC: ${infra.readRpcMasked} (${infra.readRpcClass})${
+      cachedReadRpcLatencyMs != null ? ` · ${cachedReadRpcLatencyMs}ms` : ""
+    }`,
+  );
+  pushLog(
+    "info",
+    `Tx RPC: ${infra.txRpcMasked} (${infra.txRpcIsHelius ? "Helius" : "public"}) — send only`,
+  );
+  for (const warning of infra.warnings) {
+    pushLog("warn", warning);
+  }
+}
+
 void pollLoop();
+void bootInfra();
 
 console.log(`GCC server listening on http://localhost:${PORT}`);
-console.log(`Phoenix data: HTTP API + read RPC (${PHOENIX_READ_RPC_URL})`);
-console.log(`Tx RPC (send only): ${TX_RPC_URL.includes("api-key") ? "Helius configured" : TX_RPC_URL}`);
+console.log(
+  `Phoenix market data: WebSocket (mark + orderbook) · REST candles (${process.env.PHOENIX_API_URL ?? "https://perp-api.phoenix.trade"})`,
+);
+console.log(`Read RPC (Rise bootstrap only): ${maskRpcUrl(PHOENIX_READ_RPC_URL)}`);
+console.log(
+  `Tx RPC (send only): ${TX_RPC_URL.includes("api-key") ? "Helius configured" : TX_RPC_URL}`,
+);
+if (SHRED_PORT) {
+  console.log(`ShredStream UDP listener: :${SHRED_PORT}`);
+}

@@ -6,16 +6,20 @@ import type {
   GccMetrics,
   MarketBriefing,
   MarketSnapshot,
+  OrderbookSnapshot,
   PaperTradeRecord,
 } from "@gcc/shared";
 import {
   DEFAULT_BOT_CONFIG,
   PaperPortfolio,
   type PaperPortfolioState,
+  type PaperPositionSide,
 } from "@gcc/shared";
 import {
+  analyzeAdaptive,
   analyzeCandles,
   analyzeWaveScalp,
+  type AdaptiveAnalysis,
   type Candle,
   type TaAnalysis,
   type WaveScalpAnalysis,
@@ -46,13 +50,35 @@ export class BotEngine {
   };
   private paper = new PaperPortfolio();
   private lastPrice: number | null = null;
-  private lastAnalysis: TaAnalysis | WaveScalpAnalysis | null = null;
+  private lastAnalysis: TaAnalysis | WaveScalpAnalysis | AdaptiveAnalysis | null = null;
   private lastBriefing: MarketBriefing | null = null;
   private lastSignalAt = 0;
   private lastScanLogAt = 0;
   private scanCount = 0;
   private warmedUp = false;
   private waitingForPriceLogged = false;
+  private lastSurvivalLogAt = 0;
+  private lastTransientLogAt = 0;
+  private lastSpreadBps: number | null = null;
+  private maxSpreadBps = 35;
+
+  /** 0 = near death, 1 = full bankroll — sizes positions and tightens risk. */
+  private survivalRiskScale(): number {
+    const price = this.lastPrice;
+    if (!price) return 1;
+    const state = this.paper.getState(price, this.config.paperMinBalanceUsdc);
+    const start = state.startingBalanceUsdc;
+    const floor = this.config.paperMinBalanceUsdc;
+    const span = Math.max(start - floor, 1);
+    return Math.max(0, Math.min(1, (state.equityUsdc - floor) / span));
+  }
+
+  private survivalLifePct(): number {
+    const price = this.lastPrice;
+    if (!price) return 100;
+    const state = this.paper.getState(price, this.config.paperMinBalanceUsdc);
+    return (state.equityUsdc / state.startingBalanceUsdc) * 100;
+  }
 
   constructor(
     private trading: TradingCore,
@@ -74,7 +100,7 @@ export class BotEngine {
     return this.metrics;
   }
 
-  getLastAnalysis(): TaAnalysis | WaveScalpAnalysis | null {
+  getLastAnalysis(): TaAnalysis | WaveScalpAnalysis | AdaptiveAnalysis | null {
     return this.lastAnalysis;
   }
 
@@ -83,19 +109,80 @@ export class BotEngine {
   }
 
   getPaperPortfolio(markPrice?: number | null): PaperPortfolioState {
-    return this.paper.getState(markPrice ?? this.lastPrice);
+    return this.paper.getState(
+      markPrice ?? this.lastPrice,
+      this.config.paperMinBalanceUsdc,
+    );
   }
 
   getPaperTrades(): PaperTradeRecord[] {
     return this.paper.getTrades();
   }
 
+  loadTradeHistory(trades: PaperTradeRecord[]) {
+    this.paper.loadTradeHistory(trades);
+  }
+
+  restorePaperSession(snapshot: {
+    trades: PaperTradeRecord[];
+    portfolio: {
+      startingBalanceUsdc: number;
+      balanceUsdc: number;
+      positionSide: "flat" | "long" | "short";
+      positionSizeBase: number;
+      entryPriceUsd: number | null;
+      leverage: number;
+    } | null;
+  }) {
+    if (snapshot.portfolio) {
+      this.config.paperBalanceUsdc = snapshot.portfolio.startingBalanceUsdc;
+      this.config.paperLeverage = snapshot.portfolio.leverage;
+      this.paper.importSnapshot({ ...snapshot.portfolio, trades: snapshot.trades });
+      this.onLog(
+        "info",
+        `Restored paper · $${snapshot.portfolio.balanceUsdc.toFixed(2)} USDC · ${snapshot.portfolio.positionSide} · ${snapshot.trades.length} trades`,
+      );
+    } else {
+      this.paper.loadTradeHistory(snapshot.trades);
+    }
+  }
+
+  exportPaperSession(): {
+    trades: PaperTradeRecord[];
+    portfolio: {
+      startingBalanceUsdc: number;
+      balanceUsdc: number;
+      positionSide: PaperPositionSide;
+      positionSizeBase: number;
+      entryPriceUsd: number | null;
+      leverage: number;
+    };
+  } {
+    const snap = this.paper.exportSnapshot();
+    return {
+      trades: snap.trades,
+      portfolio: {
+        startingBalanceUsdc: snap.startingBalanceUsdc,
+        balanceUsdc: snap.balanceUsdc,
+        positionSide: snap.positionSide,
+        positionSizeBase: snap.positionSizeBase,
+        entryPriceUsd: snap.entryPriceUsd,
+        leverage: snap.leverage,
+      },
+    };
+  }
+
   updateConfig(partial: Partial<BotConfig>) {
+    const wasRunning = this.status === "running";
+    const prevPoll = this.config.pollIntervalMs;
     this.config = { ...this.config, ...partial };
-    this.syncPaperConfig();
-    if (this.status === "running") {
-      this.pause();
-      this.start();
+    if (
+      wasRunning &&
+      partial.pollIntervalMs != null &&
+      partial.pollIntervalMs !== prevPoll
+    ) {
+      if (this.timer) clearInterval(this.timer);
+      this.timer = setInterval(() => void this.tick(), this.config.pollIntervalMs);
     }
   }
 
@@ -104,16 +191,40 @@ export class BotEngine {
       startingBalanceUsdc: this.config.paperBalanceUsdc,
       leverage: this.config.paperLeverage,
       marginFraction: 0.5,
+      takerFeeBps: this.config.paperTakerFeeBps,
     });
   }
 
-  async start() {
+  resetPaper(balanceUsdc?: number) {
+    if (balanceUsdc != null) {
+      this.config.paperBalanceUsdc = balanceUsdc;
+    }
+    this.syncPaperConfig();
+    this.metrics = {
+      volumeUsd: 0,
+      realizedPnlUsd: 0,
+      unrealizedPnlUsd: 0,
+      tradeCount: 0,
+      updatedAt: new Date().toISOString(),
+    };
+    this.onLog(
+      "info",
+      `Paper wallet reset to $${this.config.paperBalanceUsdc} USDC`,
+    );
+  }
+
+  async start(options?: { freshPaper?: boolean }) {
     if (this.status === "running") return;
+    const shouldReset =
+      options?.freshPaper === true ||
+      (options?.freshPaper !== false && this.status === "stopped");
+    if (shouldReset) {
+      this.syncPaperConfig();
+    }
     this.status = "running";
     this.config.status = "running";
     this.scanCount = 0;
     this.warmedUp = false;
-    this.syncPaperConfig();
 
     if (this.fetchBriefing) {
       try {
@@ -133,6 +244,10 @@ export class BotEngine {
     this.onLog(
       "info",
       `Warmup: ${this.config.warmupScanCount} scan cycles before first trade`,
+    );
+    this.onLog(
+      "info",
+      `Survival: lose the $${this.config.paperBalanceUsdc} bankroll = DEAD (no respawn until reset)`,
     );
     this.timer = setInterval(() => void this.tick(), this.config.pollIntervalMs);
   }
@@ -157,9 +272,21 @@ export class BotEngine {
     const price = Number(snapshot.markPriceUsd ?? snapshot.bestBid ?? 0);
     if (!price) return;
     this.lastPrice = price;
-    const state = this.paper.getState(price);
+    if (this.status !== "running") return;
+    const state = this.paper.getState(price, this.config.paperMinBalanceUsdc);
     this.metrics.unrealizedPnlUsd = state.unrealizedPnlUsd;
     this.metrics.updatedAt = new Date().toISOString();
+    if (!state.alive) {
+      this.die("equity hit zero — account dead");
+    }
+  }
+
+  onOrderbookUpdate(book: OrderbookSnapshot) {
+    const bid = Number(book.bids[0]?.price ?? 0);
+    const ask = Number(book.asks[0]?.price ?? 0);
+    if (!bid || !ask) return;
+    const mid = (bid + ask) / 2;
+    this.lastSpreadBps = ((ask - bid) / mid) * 10_000;
   }
 
   private async tick() {
@@ -180,24 +307,69 @@ export class BotEngine {
 
     try {
       const now = Date.now();
-      const candles = await this.loadCandles();
+      const candleBundle =
+        this.config.strategy === "adaptive"
+          ? await this.loadAdaptiveCandles()
+          : { primary: await this.loadCandles(), structure: [] as Candle[] };
+      const candles = candleBundle.primary;
       if (!candles.length) return;
 
       const barTime = candles.at(-1)?.time ?? Math.floor(now / 1000);
-      const portfolio = this.paper.getState(this.lastPrice);
+      const portfolio = this.paper.getState(
+        this.lastPrice,
+        this.config.paperMinBalanceUsdc,
+      );
 
-      if (this.config.strategy === "wave_scalp") {
-        const wave = analyzeWaveScalp(
-          candles,
-          portfolio.positionSide,
-          portfolio.entryPriceUsd,
-          {
-            takeProfitPct: this.config.takeProfitPct,
-            stopLossPct: this.config.stopLossPct,
-            swingLookback: 20,
-            nearExtremePct: 0.35,
-          },
-        );
+      if (!portfolio.alive) {
+        this.die("equity below survival floor");
+        return;
+      }
+
+      const lifePct = this.survivalLifePct();
+      const riskScale = this.survivalRiskScale();
+
+      if (
+        this.config.strategy === "adaptive" ||
+        this.config.strategy === "wave_scalp"
+      ) {
+        const stopLossPct =
+          riskScale < 0.35
+            ? this.config.stopLossPct * 0.65
+            : riskScale < 0.55
+              ? this.config.stopLossPct * 0.85
+              : this.config.stopLossPct;
+
+        const wave =
+          this.config.strategy === "adaptive"
+            ? analyzeAdaptive(
+                candles,
+                portfolio.positionSide,
+                portfolio.entryPriceUsd,
+                {
+                  trendTakeProfitPct: Math.max(
+                    1.8,
+                    this.config.takeProfitPct * 0.35,
+                  ),
+                  trendStopLossPct: Math.max(1, stopLossPct * 0.4),
+                  scalpTakeProfitPct: Math.min(1.5, this.config.takeProfitPct * 0.2),
+                  scalpStopLossPct: Math.min(1.2, stopLossPct * 0.25),
+                  takerFeeBps: this.config.paperTakerFeeBps,
+                  intelProfile: this.config.intelProfile,
+                },
+                candleBundle.structure,
+              )
+            : analyzeWaveScalp(
+                candles,
+                portfolio.positionSide,
+                portfolio.entryPriceUsd,
+                {
+                  takeProfitPct: this.config.takeProfitPct,
+                  stopLossPct,
+                  swingLookback: 20,
+                  nearExtremePct: 0.35,
+                  takerFeeBps: this.config.paperTakerFeeBps,
+                },
+              );
         this.lastAnalysis = wave;
 
         if (now - this.lastScanLogAt >= 10_000) {
@@ -208,23 +380,88 @@ export class BotEngine {
             portfolio.positionSide === "flat"
               ? "flat"
               : `${portfolio.positionSide} @ $${portfolio.entryPriceUsd?.toFixed(4)}`;
-          const bal = portfolio.balanceUsdc.toFixed(2);
+          const bal = portfolio.equityUsdc.toFixed(2);
+          const life =
+            lifePct <= 25
+              ? " · CRITICAL"
+              : lifePct <= 50
+                ? " · danger"
+                : "";
+          const adaptive = wave as AdaptiveAnalysis;
+          const modeTag =
+            this.config.strategy === "adaptive" && adaptive.activeMode
+              ? ` · ${adaptive.regime}/${adaptive.activeMode}`
+              : "";
+          const confTag =
+            this.config.strategy === "adaptive" &&
+            adaptive.confidence != null
+              ? ` · ${adaptive.confidence}% conf`
+              : "";
           this.onLog(
             "info",
-            `Scan ${this.config.symbol} @ $${mark} · ${pos} · $${bal} USDC · ${wave.reason}`,
+            `Scan ${this.config.symbol} @ $${mark} · ${pos} · life ${lifePct.toFixed(0)}% ($${bal})${life}${modeTag}${confTag} · ${wave.reason}`,
+          );
+        }
+
+        if (now - this.lastSurvivalLogAt >= 60_000 && lifePct <= 40) {
+          this.lastSurvivalLogAt = now;
+          this.onLog(
+            "warn",
+            `SURVIVAL · $${portfolio.equityUsdc.toFixed(2)} left (${lifePct.toFixed(0)}% of $${portfolio.startingBalanceUsdc}) — bad trades = death, no respawn`,
           );
         }
 
         if (!this.warmedUp) {
           if (this.scanCount >= this.config.warmupScanCount) {
             this.warmedUp = true;
-            this.onLog("info", "Warmup complete — watching for wave entries");
+            this.onLog(
+              "info",
+              this.config.strategy === "adaptive"
+                ? `Warmup complete — market brain online (1m + 5m · ${this.config.intelProfile} conviction)`
+                : "Warmup complete — watching for wave entries",
+            );
           }
           return;
         }
 
         if (wave.action === "hold") return;
         if (now - this.lastSignalAt < 15_000) return;
+
+        const isOpen =
+          wave.action === "open_long" || wave.action === "open_short";
+        if (isOpen && riskScale < 0.2) {
+          this.onLog(
+            "warn",
+            `Skipped entry — life too low (${lifePct.toFixed(0)}%) to risk another trade`,
+          );
+          return;
+        }
+        if (
+          isOpen &&
+          this.lastSpreadBps != null &&
+          this.lastSpreadBps > this.maxSpreadBps
+        ) {
+          this.onLog(
+            "warn",
+            `Skipped entry — spread ${this.lastSpreadBps.toFixed(1)} bps too wide (max ${this.maxSpreadBps})`,
+          );
+          return;
+        }
+        if (this.config.mode !== "paper") {
+          this.onLog(
+            "warn",
+            `Live mode not wired for ${this.config.strategy} — switch to Paper or bot will not trade`,
+          );
+          return;
+        }
+        if (
+          isOpen &&
+          !this.paper.canOpen(this.lastPrice, this.config.paperMinBalanceUsdc)
+        ) {
+          this.die("cannot afford another trade");
+          return;
+        }
+
         this.lastSignalAt = now;
 
         if (this.config.mode === "paper") {
@@ -267,18 +504,37 @@ export class BotEngine {
       const reason = analysis?.reason ?? "signal";
       this.onLog("info", `TRADE · ${result.message} · ${reason}`);
     } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unknown bot error";
+      const transient =
+        /429|rate.?limit|too many requests|503|502|504|timeout|ECONNRESET/i.test(
+          message,
+        );
+      if (transient) {
+        const ts = Date.now();
+        if (ts - this.lastTransientLogAt >= 60_000) {
+          this.lastTransientLogAt = ts;
+          this.onLog(
+            "warn",
+            `Phoenix rate-limited — using cached candles, will retry shortly`,
+          );
+        }
+        return;
+      }
       this.status = "error";
       this.config.status = "error";
-      this.onLog(
-        "error",
-        error instanceof Error ? error.message : "Unknown bot error",
-      );
+      this.onLog("error", message);
       this.pause();
     }
   }
 
-  private executePaperWave(wave: WaveScalpAnalysis, barTime: number) {
+  private executePaperWave(
+    wave: WaveScalpAnalysis | AdaptiveAnalysis,
+    barTime: number,
+  ) {
     const price = this.lastPrice!;
+    const riskScale = this.survivalRiskScale();
+    const sizeBase = this.paper.computeSizeBase(price, riskScale);
     let trade: PaperTradeRecord | null = null;
     const sym = this.config.symbol;
 
@@ -289,6 +545,7 @@ export class BotEngine {
           priceUsd: price,
           reason: wave.reason,
           barTime,
+          sizeBase,
         });
         break;
       case "close_long":
@@ -305,6 +562,7 @@ export class BotEngine {
           priceUsd: price,
           reason: wave.reason,
           barTime,
+          sizeBase,
         });
         break;
       case "close_short":
@@ -324,7 +582,7 @@ export class BotEngine {
       return;
     }
 
-    const state = this.paper.getState(price);
+    const state = this.paper.getState(price, this.config.paperMinBalanceUsdc);
     this.metrics.volumeUsd += trade.notionalUsd;
     this.metrics.tradeCount += 1;
     this.metrics.realizedPnlUsd +=
@@ -338,18 +596,75 @@ export class BotEngine {
         : "";
     this.onLog(
       "info",
-      `TRADE · ${trade.action} ${sym} @ $${price.toFixed(4)} · bal $${state.balanceUsdc.toFixed(2)} USDC${pnl} · ${wave.reason}`,
+      `TRADE · perp ${trade.action} ${sym} · ${trade.sizeBase.toFixed(0)} tokens @ $${price.toFixed(4)} · ~$${trade.notionalUsd.toFixed(0)} notional · equity $${state.equityUsdc.toFixed(2)} USDC${pnl} · ${wave.reason}`,
     );
     this.onPaperTrade?.(trade);
+
+    if (!state.alive) {
+      this.die("account wiped after trade");
+    }
   }
 
-  private async loadCandles(): Promise<Candle[]> {
+  private die(reason: string) {
+    if (this.status !== "running") return;
+    const price = this.lastPrice;
+    const sym = this.config.symbol;
+    const barTime = Math.floor(Date.now() / 1000);
+    const side = this.paper.getPositionSide();
+
+    if (side === "long" && price) {
+      const trade = this.paper.closeLong({
+        symbol: sym,
+        priceUsd: price,
+        reason: `death: ${reason}`,
+        barTime,
+      });
+      if (trade) this.onPaperTrade?.(trade);
+    } else if (side === "short" && price) {
+      const trade = this.paper.closeShort({
+        symbol: sym,
+        priceUsd: price,
+        reason: `death: ${reason}`,
+        barTime,
+      });
+      if (trade) this.onPaperTrade?.(trade);
+    }
+
+    const final = this.paper.getState(price, this.config.paperMinBalanceUsdc);
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    this.status = "dead";
+    this.config.status = "dead";
+    this.onLog(
+      "error",
+      `DEAD · $${final.balanceUsdc.toFixed(2)} USDC left (started $${final.startingBalanceUsdc}) — ${reason}. Game over. Reset paper to respawn.`,
+    );
+  }
+
+  private async loadCandles(limit = 120): Promise<Candle[]> {
     if (!this.getCandles) return [];
     return this.getCandles(
       this.config.symbol,
       this.config.candleTimeframe,
-      120,
+      limit,
     );
+  }
+
+  /** 1m timing + 5m structure for adaptive brain. */
+  private async loadAdaptiveCandles(): Promise<{
+    primary: Candle[];
+    structure: Candle[];
+  }> {
+    if (!this.getCandles) return { primary: [], structure: [] };
+    const sym = this.config.symbol;
+    const tf = this.config.candleTimeframe;
+    const [primary, structure] = await Promise.all([
+      this.getCandles(sym, tf, 120),
+      tf === "5m"
+        ? this.getCandles(sym, "5m", 72)
+        : this.getCandles(sym, "5m", 72),
+    ]);
+    return { primary, structure };
   }
 
   private async computeClassicSignal(

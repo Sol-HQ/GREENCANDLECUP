@@ -20,7 +20,7 @@ Do these top-to-bottom. Do not skip Phase 1 validation before spending on VPS.
 ### Dashboard & data
 - [ ] All nav tabs load: Overview, Trade, Positions, Orders, Bot, System
 - [ ] Header shows **Offline → Live** when WS connects
-- [ ] Trade page: GCC chart loads (try 15s, 1m, 5m timeframes)
+- [ ] Trade page: GCC chart loads (try 1m, 5m, 15m timeframes)
 - [ ] Trade page: TradingView + Birdeye tabs load
 - [ ] Orderbook updates on Trade page
 - [ ] Alerts panel receives price-move pings

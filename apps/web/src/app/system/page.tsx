@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { Shell } from "@/components/shell";
 import { Card, Stat } from "@/components/ui";
 import { GLOSSARY } from "@gcc/shared";
@@ -7,9 +8,42 @@ import { PageGuide } from "@/components/page-guide";
 import { useGccSocket } from "@/hooks/use-gcc-socket";
 import { useNetwork } from "@/components/network-provider";
 
+type InfraStatus = {
+  phoenixApiHost: string;
+  phoenixDataPath: string;
+  readRpcMasked: string;
+  readRpcClass: string;
+  readRpcLatencyMs: number | null;
+  txRpcMasked: string;
+  txRpcIsHelius: boolean;
+  vpsPublicIp: string | null;
+  shredStream: {
+    configured: boolean;
+    listening: boolean;
+    active: boolean;
+    port: number | null;
+    packetsLastMinute: number;
+  };
+  warnings: string[];
+};
+
 export default function SystemPage() {
   const { health, logs, connected } = useGccSocket();
   const { network } = useNetwork();
+  const [infra, setInfra] = useState<InfraStatus | null>(null);
+
+  useEffect(() => {
+    const api = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8787";
+    fetch(`${api}/api/infra`)
+      .then((r) => r.json())
+      .then(setInfra)
+      .catch(() => setInfra(null));
+  }, []);
+
+  const shredActive =
+    health?.shredStreamActive ?? infra?.shredStream.active ?? false;
+  const shredListening =
+    health?.shredStreamListening ?? infra?.shredStream.listening ?? false;
 
   return (
     <Shell connected={connected}>
@@ -17,7 +51,7 @@ export default function SystemPage() {
         <PageGuide page="system" />
         <div className="grid gap-4 md:grid-cols-3">
           <Stat
-            label="Phoenix"
+            label="Phoenix HTTP"
             value={health?.phoenixConnected ? "Connected" : "Down"}
             tone={health?.phoenixConnected ? "good" : "bad"}
           />
@@ -31,12 +65,42 @@ export default function SystemPage() {
           />
           <Stat
             label="ShredStream"
-            value={health?.shredStreamActive ? "Active" : "Inactive"}
+            value={
+              shredActive
+                ? "Active"
+                : shredListening
+                  ? "Listening"
+                  : "Inactive"
+            }
+            tone={shredActive ? "good" : undefined}
           />
         </div>
 
         <Card title="Network">
           <div className="space-y-2 text-sm text-zinc-300">
+            <p>
+              Phoenix data:{" "}
+              <span className="text-zinc-100">
+                {infra?.phoenixApiHost ?? network?.phoenixApiHost ?? "perp-api.phoenix.trade"}{" "}
+                · HTTP API
+              </span>
+            </p>
+            <p className="text-xs text-zinc-500">
+              {infra?.phoenixDataPath ??
+                "Candles, orderbook, and mark price come from Phoenix HTTP — not api.mainnet-beta.solana.com."}
+            </p>
+            <p>
+              Read RPC (Rise bootstrap):{" "}
+              <span className="text-zinc-100">
+                {infra?.readRpcMasked ?? network?.phoenixRpcMasked ?? "public RPC"}{" "}
+                · {infra?.readRpcClass ?? network?.readRpcClass ?? "public"}
+                {infra?.readRpcLatencyMs != null
+                  ? ` · ${infra.readRpcLatencyMs}ms`
+                  : health?.readRpcLatencyMs != null
+                    ? ` · ${health.readRpcLatencyMs}ms`
+                    : ""}
+              </span>
+            </p>
             <p>
               Wallet RPC:{" "}
               <span className="text-zinc-100">
@@ -44,21 +108,17 @@ export default function SystemPage() {
               </span>
             </p>
             <p>
-              Phoenix / reads:{" "}
+              Tx send (Helius):{" "}
               <span className="text-zinc-100">
-                {network?.phoenixRpcMasked ?? "public RPC"} + HTTP API
+                {infra?.txRpcMasked ?? network?.txRpcMasked ?? "—"}
+                {infra?.txRpcIsHelius === false ? " · not Helius" : ""}
               </span>
             </p>
             <p>
-              Tx send (Helius):{" "}
+              Vultr VPS:{" "}
               <span className="text-zinc-100">
-                {network?.txRpcMasked ?? network?.botRpcMasked ?? "—"}
+                {infra?.vpsPublicIp ?? network?.vpsPublicIp ?? "not configured"}
               </span>
-            </p>
-            <p className="text-xs text-zinc-500">
-              Data path: Phoenix HTTP for orderbook/candles/mark. Public Solana
-              RPC for wallet reads and Rise SDK fallback only. Helius fires on
-              sendTransaction — not on dashboard idle.
             </p>
             <p>
               Trading:{" "}
@@ -68,6 +128,11 @@ export default function SystemPage() {
               · Phoenix: mainnet (GCC)
             </p>
             <p className="text-xs text-zinc-500">{GLOSSARY.mainnetVsDevnet.body}</p>
+            {(infra?.warnings ?? []).map((w) => (
+              <p key={w} className="text-xs text-amber-400/90">
+                {w}
+              </p>
+            ))}
           </div>
         </Card>
 
@@ -98,9 +163,13 @@ export default function SystemPage() {
               </li>
               <li>
                 <strong className="text-zinc-200">Status:</strong>{" "}
-                {network?.shredStreamConfigured
-                  ? "Env configured — smoke test on VPS"
-                  : "Not configured yet (expected before Sep 1)"}
+                {shredActive
+                  ? `Receiving packets (${health?.shredStreamPacketsPerMin ?? infra?.shredStream.packetsLastMinute ?? 0}/min)`
+                  : shredListening
+                    ? `Listening on UDP :${infra?.shredStream.port ?? "8002"} — waiting for Triton`
+                    : network?.shredStreamConfigured
+                      ? "Env configured — restart server after setting SHREDSTREAM_UDP_PORT"
+                      : "Set SHREDSTREAM_UDP_PORT + register VPS IP with Triton"}
               </li>
             </ul>
           </div>

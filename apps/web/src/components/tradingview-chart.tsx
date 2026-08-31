@@ -1,20 +1,22 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { useElementSize } from "@/hooks/use-element-size";
 
 /** Free TradingView embed — their servers supply all candle data. */
 export function TradingViewChart({
   symbol = "BINANCE:SOLUSDT.P",
-  height = 520,
 }: {
   symbol?: string;
-  height?: number;
 }) {
+  const wrapRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const { width, height } = useElementSize(wrapRef, 320);
 
   useEffect(() => {
     const el = containerRef.current;
-    if (!el) return;
+    if (!el || width < 40 || height < 200) return;
+
     el.innerHTML = "";
 
     const widget = document.createElement("div");
@@ -49,13 +51,15 @@ export function TradingViewChart({
     return () => {
       el.innerHTML = "";
     };
-  }, [symbol, height]);
+  }, [symbol, width, height]);
 
   return (
-    <div
-      ref={containerRef}
-      className="tradingview-widget-container overflow-hidden rounded-xl border border-zinc-800"
-      style={{ height }}
-    />
+    <div ref={wrapRef} className="h-full min-h-[320px] w-full">
+      <div
+        ref={containerRef}
+        className="tradingview-widget-container h-full w-full overflow-hidden rounded-xl border border-zinc-800"
+        style={{ minHeight: height || 320 }}
+      />
+    </div>
   );
 }
