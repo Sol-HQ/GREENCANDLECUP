@@ -18,7 +18,7 @@
     "@gcc/trading-core": "workspace:*",
     "@hono/node-server": "^1.14.1",
     "dotenv": "^16.4.7",
-    "hono": "^4.7.5",
+    "hono": "^4.13.11",
     "ws": "^8.18.1"
   },
   "devDependencies": {
